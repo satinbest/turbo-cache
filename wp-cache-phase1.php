@@ -3,6 +3,7 @@
 if ( ! function_exists( 'wp_cache_phase2' ) ) {
 	require_once __DIR__. '/wp-cache-phase2.php';
 }
+require_once __DIR__ . '/inc/request-safety.php';
 
 // error_reporting(E_ERROR | E_PARSE); // uncomment to debug this file!
 // directory where the configuration file lives.
@@ -124,6 +125,15 @@ if ( wpsc_is_rejected_cookie() ) {
 		define( 'DONOTCACHEPAGE', 1 );
 	}
 	wp_cache_debug( 'Caching disabled because rejected cookie found.' );
+	return true;
+}
+
+$matched_wc_cookie = turbo_cache_detect_woocommerce_cookie();
+if ( false !== $matched_wc_cookie ) {
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', 1 );
+	}
+	wp_cache_debug( 'Caching disabled because WooCommerce dynamic cookie found: ' . $matched_wc_cookie );
 	return true;
 }
 

@@ -8,6 +8,8 @@
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_is_writable -- TODO: Fix or determine for sure that these should not be fixed.
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- TODO: Fix or determine for sure that these should not be fixed.
 
+require_once __DIR__ . '/inc/request-safety.php';
+
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
 		return false;
@@ -2407,6 +2409,9 @@ function wp_cache_ob_callback( $buffer ) {
 
 	if ( defined( 'DONOTCACHEPAGE' ) ) {
 		wp_cache_debug( 'DONOTCACHEPAGE defined. Caching disabled.', 2 );
+		$cache_this_page = false;
+	} elseif ( $matched_wc_cookie = turbo_cache_detect_woocommerce_cookie() ) {
+		wp_cache_debug( 'WooCommerce dynamic cookie found: ' . $matched_wc_cookie . '. Caching disabled.', 2 );
 		$cache_this_page = false;
 	} elseif ( $wp_cache_no_cache_for_get && wpsc_is_get_query() ) {
 		wp_cache_debug( 'Non empty GET request. Caching disabled on settings page. ' . wpsc_dump_get_request(), 1 );
