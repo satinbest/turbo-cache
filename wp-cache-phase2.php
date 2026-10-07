@@ -9,6 +9,7 @@
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- TODO: Fix or determine for sure that these should not be fixed.
 
 require_once __DIR__ . '/inc/request-safety.php';
+require_once __DIR__ . '/inc/cache-storage.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
@@ -940,19 +941,7 @@ function get_supercache_dir( $blog_id = 0 ) {
  * @return string Normalised URI, or '' if $uri is not a string.
  */
 function wpsc_normalize_uri_case( $uri ) {
-	// Not a cast: the REST endpoint feeds this straight from get_json_params(),
-	// where 'url' can be an array, and "Array" is a plausible directory name.
-	if ( ! is_string( $uri ) ) {
-		return '';
-	}
-
-	return preg_replace_callback(
-		'/%[0-9A-Fa-f]{2}|[A-Z]+/',
-		function ( $matches ) {
-			return '%' === $matches[0][0] ? strtoupper( $matches[0] ) : strtolower( $matches[0] );
-		},
-		$uri
-	);
+	return turbo_cache_normalize_uri_case( $uri );
 }
 
 /**
@@ -1120,27 +1109,7 @@ function get_current_url_supercache_dir( $post_id = 0 ) {
 		$uri = $wp_cache_request_uri;
 	}
 
-	$uri      = wpsc_normalize_uri_case( $uri );
-	$uri      = wpsc_deep_replace( array( '..', '\\', 'index.php' ), preg_replace( '/[ <>\'\"\r\n\t\(\)]/', '', preg_replace( '/(\?.*)?(#.*)?$/', '', $uri ) ) );
-	$hostname = $WPSC_HTTP_HOST;
-	// Get hostname from wp options for wp-cron, wp-cli and similar requests.
-	// Lowercased because $WPSC_HTTP_HOST already is, and the two have to name the
-	// same directory. See #1081.
-	if ( empty( $hostname ) && function_exists( 'get_option' ) ) {
-		$hostname = (string) parse_url( get_option( 'home' ), PHP_URL_HOST );
-		$hostname = function_exists( 'mb_strtolower' ) ? mb_strtolower( $hostname ) : strtolower( $hostname );
-	}
-	$dir = preg_replace( '/:.*$/', '', $hostname ) . $uri; // To avoid XSS attacks
-	if ( function_exists( 'apply_filters' ) ) {
-		$dir = apply_filters( 'supercache_dir', $dir );
-	} else {
-		$dir = do_cacheaction( 'supercache_dir', $dir );
-	}
-	$dir = $cache_path . 'supercache/' . $dir . '/';
-	if ( is_array( $cached_direct_pages ) && in_array( $_SERVER['REQUEST_URI'], $cached_direct_pages ) ) {
-		$dir = ABSPATH . $uri . '/';
-	}
-	$dir = str_replace( '..', '', str_replace( '//', '/', $dir ) );
+	$dir = turbo_cache_get_storage_dir( $uri, $WPSC_HTTP_HOST, $cache_path );
 
 	if ( wpsc_path_is_too_long( $dir ) ) {
 		wp_cache_debug( 'get_current_url_supercache_dir: path is ' . strlen( $dir ) . ' bytes, too long for this platform. Not caching this request.' );
@@ -1353,29 +1322,7 @@ function wpsc_is_https() {
 }
 
 function supercache_filename() {
-	global $cached_direct_pages;
-
-	// Add support for https and http caching
-	$is_https  = wpsc_is_https();
-	$extra_str = $is_https ? '-https' : '';
-
-	if ( function_exists( 'apply_filters' ) ) {
-		$extra_str = apply_filters( 'supercache_filename_str', $extra_str );
-	} else {
-		$extra_str = do_cacheaction( 'supercache_filename_str', $extra_str );
-	}
-
-	if ( is_array( $cached_direct_pages ) && in_array( $_SERVER['REQUEST_URI'], $cached_direct_pages ) ) {
-		$extra_str = '';
-	}
-
-	// The filename must always be a single path segment. Filters above may
-	// return arbitrary data, so restrict it to a safe set of characters.
-	$extra_str = preg_replace( '/[^a-zA-Z0-9_-]/', '', (string) $extra_str );
-
-	$filename = 'index' . $extra_str . '.html';
-
-	return $filename;
+	return turbo_cache_get_cache_filename();
 }
 
 function get_oc_version() {
@@ -1477,14 +1424,7 @@ function wp_cache_confirm_delete( $dir ) {
 
 // copy of _deep_replace() to be used before WordPress loads
 function wpsc_deep_replace( $search, $subject ) {
-	$subject = (string) $subject;
-
-	$count = 1;
-	while ( $count ) {
-		$subject = str_replace( $search, '', $subject, $count );
-	}
-
-	return $subject;
+	return turbo_cache_deep_replace( $search, $subject );
 }
 
 function wpsc_get_protected_directories() {
@@ -2880,12 +2820,12 @@ function wp_cache_get_ob( &$buffer ) {
 			wp_cache_debug( "Warning! The file $tmp_cache_filename was empty. Did not rename to {$cache_fname}", 5 );
 			@unlink( $tmp_cache_filename );
 		} else {
-			if ( ! @rename( $tmp_cache_filename, $cache_fname ) ) {
-				@unlink( $cache_fname );
-				@rename( $tmp_cache_filename, $cache_fname );
+			if ( ! turbo_cache_atomic_rename( $tmp_cache_filename, $cache_fname ) ) {
+				wp_cache_debug( "FAILED to rename temp supercache file to $cache_fname", 1 );
+			} else {
+				wp_cache_debug( "Renamed temp supercache file to $cache_fname", 5 );
+				$added_cache = 1;
 			}
-			wp_cache_debug( "Renamed temp supercache file to $cache_fname", 5 );
-			$added_cache = 1;
 		}
 	}
 	if ( $gz ) {
@@ -2894,12 +2834,12 @@ function wp_cache_get_ob( &$buffer ) {
 			wp_cache_debug( "Warning! The file {$tmp_cache_filename}.gz was empty. Did not rename to {$cache_fname}.gz", 5 );
 			@unlink( $tmp_cache_filename . '.gz' );
 		} else {
-			if ( ! @rename( $tmp_cache_filename . '.gz', $cache_fname . '.gz' ) ) {
-				@unlink( $cache_fname . '.gz' );
-				@rename( $tmp_cache_filename . '.gz', $cache_fname . '.gz' );
+			if ( ! turbo_cache_atomic_rename( $tmp_cache_filename . '.gz', $cache_fname . '.gz' ) ) {
+				wp_cache_debug( "FAILED to rename temp supercache gz file to {$cache_fname}.gz", 1 );
+			} else {
+				wp_cache_debug( "Renamed temp supercache gz file to {$cache_fname}.gz", 5 );
+				$added_cache = 1;
 			}
-			wp_cache_debug( "Renamed temp supercache gz file to {$cache_fname}.gz", 5 );
-			$added_cache = 1;
 		}
 	}
 
