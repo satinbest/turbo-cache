@@ -111,40 +111,6 @@ if ( isset( $_SERVER['REQUEST_URI'] ) ) { // Cache this in case any plugin modif
 	$wp_cache_request_uri = '';
 }
 
-// don't cache in wp-admin
-if ( wpsc_is_backend() ) {
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', 1 );
-	}
-	return true;
-}
-
-// if a cookie is found that we don't like then don't serve/cache the page
-if ( wpsc_is_rejected_cookie() ) {
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', 1 );
-	}
-	wp_cache_debug( 'Caching disabled because rejected cookie found.' );
-	return true;
-}
-
-$matched_wc_cookie = turbo_cache_detect_woocommerce_cookie();
-if ( false !== $matched_wc_cookie ) {
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', 1 );
-	}
-	wp_cache_debug( 'Caching disabled because WooCommerce dynamic cookie found: ' . $matched_wc_cookie );
-	return true;
-}
-
-if ( wpsc_is_caching_user_disabled() ) {
-	wp_cache_debug( 'Caching disabled for logged in users on settings page.' );
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', 1 );
-	}
-	return true;
-}
-
 // make logged in users anonymous so they are shown logged out pages.
 if ( isset( $wp_cache_make_known_anon ) && $wp_cache_make_known_anon ) {
 	wp_supercache_cache_for_admins();
@@ -153,24 +119,13 @@ if ( isset( $wp_cache_make_known_anon ) && $wp_cache_make_known_anon ) {
 // an init action wpsc plugins can hook on to.
 do_cacheaction( 'cache_init' );
 
-if ( ! $cache_enabled ) { // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UndefinedVariable -- set by configuration or cache_init action
-	return true;
-}
-
-// don't cache or serve cached files for various URLs, including the Customizer.
-if ( isset( $_SERVER['REQUEST_METHOD'] ) && in_array( $_SERVER['REQUEST_METHOD'], array( 'POST', 'PUT', 'DELETE' ), true ) ) {
-	wp_cache_debug( 'Caching disabled for non GET request.' );
+// Turbo Cache: evaluate early request rules on hot path.
+$turbo_bypass_reason = turbo_cache_evaluate_early_request_rules();
+if ( false !== $turbo_bypass_reason ) {
 	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
 		define( 'DONOTCACHEPAGE', 1 );
 	}
-	return true;
-}
-
-if ( isset( $_GET['customize_changeset_uuid'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-	wp_cache_debug( 'Caching disabled for customizer.' );
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', 1 );
-	}
+	wp_cache_debug( 'Caching disabled by early request rule: ' . $turbo_bypass_reason );
 	return true;
 }
 
