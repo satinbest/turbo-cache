@@ -10,6 +10,7 @@
 
 require_once __DIR__ . '/inc/request-safety.php';
 require_once __DIR__ . '/inc/cache-storage.php';
+require_once __DIR__ . '/inc/cache-invalidation.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
@@ -1178,7 +1179,8 @@ function wpsc_get_realpath( $directory ) {
 // return true if directory is in the cache directory
 function wpsc_is_in_cache_directory( $directory ) {
 	global $cache_path;
-	static $rp_cache_path = '';
+	static $rp_cache_path   = '';
+	static $last_cache_path = null;
 
 	if ( $directory == '' ) {
 		wp_cache_debug( 'wpsc_is_in_cache_directory: exiting as directory is blank' );
@@ -1190,8 +1192,9 @@ function wpsc_is_in_cache_directory( $directory ) {
 		return false;
 	}
 
-	if ( $rp_cache_path == '' ) {
-		$rp_cache_path = wpsc_get_realpath( $cache_path );
+	if ( $rp_cache_path == '' || $last_cache_path !== $cache_path ) {
+		$last_cache_path = $cache_path;
+		$rp_cache_path   = wpsc_get_realpath( $cache_path );
 	}
 
 	if ( ! $rp_cache_path ) {
@@ -1206,7 +1209,15 @@ function wpsc_is_in_cache_directory( $directory ) {
 		return false;
 	}
 
-	if ( substr( $directory, 0, strlen( $rp_cache_path ) ) == $rp_cache_path ) {
+	$norm_dir = str_replace( '\\', '/', $directory );
+	$norm_rp  = str_replace( '\\', '/', $rp_cache_path );
+
+	if ( defined( 'PHP_OS_FAMILY' ) && 'Windows' === PHP_OS_FAMILY ) {
+		$norm_dir = strtolower( $norm_dir );
+		$norm_rp  = strtolower( $norm_rp );
+	}
+
+	if ( str_starts_with( $norm_dir, $norm_rp ) ) {
 		return true;
 	} else {
 		return false;
@@ -1566,17 +1577,8 @@ function wpsc_delete_url_cache( $url ) {
 		wp_cache_debug( 'wpsc_delete_url_cache: URL contains the character "?". Not deleting URL: ' . $url );
 		return false;
 	}
-	// $url is a WordPress-generated permalink, so its percent escapes are
-	// lowercase while the directory on disk has them uppercased. See #1081.
-	$dir = wpsc_normalize_uri_case( str_replace( get_option( 'home' ), '', $url ) );
-	if ( $dir != '' ) {
-		$supercachedir = get_supercache_dir();
-		wpsc_rebuild_files( $supercachedir . $dir );
-		prune_super_cache( $supercachedir . $dir . '/page', true );
-		return true;
-	} else {
-		return false;
-	}
+	// Route through Turbo Cache targeted URL purge primitive.
+	return turbo_cache_purge_url( $url );
 }
 
 // from legolas558 d0t users dot sf dot net at http://www.php.net/is_writable
@@ -3479,8 +3481,10 @@ function wpsc_post_transition( $new_status, $old_status, $post ) {
 		}
 		list( $permalink, $post_name ) = get_sample_permalink( $post );
 		$post_url                      = str_replace( array( '%postname%', '%pagename%' ), $post->post_name, $permalink );
+		turbo_cache_post_status_transition( $new_status, $old_status, $post );
 		wp_cache_post_edit( $post->ID );
 	} elseif ( $old_status !== 'publish' && $new_status === 'publish' ) { // post published
+		turbo_cache_post_status_transition( $new_status, $old_status, $post );
 		wp_cache_post_edit( $post->ID );
 		return;
 	}
@@ -3541,6 +3545,7 @@ function wp_cache_post_edit( $post_id ) {
 	} else {
 		$action = current_filter();
 		wp_cache_debug( "wp_cache_post_edit: Clearing cache for post $post_id on {$action}", 2 );
+		turbo_cache_invalidate_post( $post_id );
 		wp_cache_post_change( $post_id );
 		wpsc_delete_post_archives( $post_id ); // delete related archive pages.
 	}
@@ -3564,16 +3569,16 @@ function wp_cache_post_id_gc( $post_id, $all = 'all' ) {
 	$dir = get_current_url_supercache_dir( $post_id );
 	wp_cache_debug( "wp_cache_post_id_gc post_id: $post_id " . get_permalink( $post_id ) . " clearing cache in $dir.", 4 );
 	if ( $all ) {
-		prune_super_cache( $dir, true, true );
+		turbo_cache_purge_storage_dir( $dir, true );
 		do_action( 'gc_cache', 'prune', $permalink );
 		@rmdir( $dir );
 		$supercache_home = get_supercache_dir();
 		wp_cache_debug( "wp_cache_post_id_gc clearing cache in {$supercache_home}page/." );
-		prune_super_cache( $supercache_home . 'page/', true );
+		turbo_cache_purge_storage_dir( $supercache_home . 'page/', true );
 		do_action( 'gc_cache', 'prune', 'page/' );
 	} else {
 		wp_cache_debug( "wp_cache_post_id_gc clearing cached index files in $dir.", 4 );
-		prune_super_cache( $dir, true, true );
+		turbo_cache_purge_storage_dir( $dir, true );
 		do_action( 'gc_cache', 'prune', $permalink );
 	}
 	return true;
@@ -3642,6 +3647,14 @@ function wp_cache_post_change( $post_id ) {
 		$all = true;
 	}
 
+	if ( is_object( $post ) && 'page' === $post->post_type ) {
+		$front_page = function_exists( 'get_option' ) ? (int) get_option( 'page_on_front' ) : 0;
+		$posts_page = function_exists( 'get_option' ) ? (int) get_option( 'page_for_posts' ) : 0;
+		if ( $post_id !== $front_page && $post_id !== $posts_page ) {
+			$all = false;
+		}
+	}
+
 	$all_backup = $all;
 	$all        = apply_filters( 'wpsc_delete_related_pages_on_edit', $all ); // return 0 to disable deleting homepage and other pages.
 	if ( $all != $all_backup ) {
@@ -3658,8 +3671,7 @@ function wp_cache_post_change( $post_id ) {
 	}
 	if ( $all == true ) {
 		wp_cache_debug( 'Post change: supercache enabled: deleting cache files in ' . $dir );
-		wpsc_rebuild_files( $dir );
-		do_action( 'gc_cache', 'prune', 'homepage' );
+		turbo_cache_invalidate_homepage();
 		if ( get_option( 'show_on_front' ) == 'page' ) {
 			wp_cache_debug( 'Post change: deleting page_on_front and page_for_posts pages.', 4 );
 			wp_cache_debug( 'Post change: page_on_front ' . get_option( 'page_on_front' ), 4 );
@@ -3671,7 +3683,7 @@ function wp_cache_post_change( $post_id ) {
 			if ( get_option( 'page_for_posts' ) ) {
 				$permalink = wpsc_normalize_uri_case( trailingslashit( str_replace( get_option( 'home' ), '', get_permalink( get_option( 'page_for_posts' ) ) ) ) );
 				wp_cache_debug( 'Post change: Deleting files in: ' . str_replace( '//', '/', $dir . $permalink ) );
-				wpsc_rebuild_files( $dir . $permalink );
+				turbo_cache_purge_storage_dir( $dir . $permalink );
 				do_action( 'gc_cache', 'prune', $permalink );
 			}
 		}

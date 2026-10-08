@@ -498,9 +498,9 @@ function clear_post_supercache( $post_id ) {
 	}
 
 	wp_cache_debug( "clear_post_supercache: post_id: $post_id. deleting files in $dir" );
-	if ( get_post_type( $post_id ) != 'page') { // don't delete child pages if they exist
-		prune_super_cache( $dir, true );
+	if ( get_post_type( $post_id ) != 'page' ) { // don't delete child pages if they exist
+		turbo_cache_purge_storage_dir( $dir, true );
 	} else {
-		wpsc_delete_files( $dir );
+		turbo_cache_purge_storage_dir( $dir, false );
 	}
 }
