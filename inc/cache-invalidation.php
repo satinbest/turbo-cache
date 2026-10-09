@@ -31,15 +31,17 @@ if ( ! defined( 'ABSPATH' ) && ! defined( 'WP_CONTENT_DIR' ) && ! defined( 'WPCA
  * triggered by multiple cascading hooks (e.g. transition_post_status,
  * clean_post_cache, publish_post, edit_post) are purged on disk at most once.
  *
- * @param string $target Canonical cache target identifier or directory path.
- * @param bool   $reset  Optional. When true, clears the internal registry (for tests).
+ * @param string      $target Canonical cache target identifier or directory path.
+ * @param bool|string $action Optional. When true or 'reset', clears registry.
+ *                            When 'remove' or 'unmark', removes target.
+ *                            When 'check', tests if target is unpurged without marking.
  * @return bool True if target was NOT previously purged in this request and should proceed;
  *              false if target is a duplicate or empty.
  */
-function turbo_cache_deduplicate_purge( $target, $reset = false ) {
+function turbo_cache_deduplicate_purge( $target, $action = false ) {
 	static $purged_targets = array();
 
-	if ( true === $reset ) {
+	if ( true === $action || 'reset' === $action ) {
 		$purged_targets = array();
 		return true;
 	}
@@ -55,6 +57,15 @@ function turbo_cache_deduplicate_purge( $target, $reset = false ) {
 		$canonical_key = '/';
 	}
 
+	if ( 'remove' === $action || 'unmark' === $action ) {
+		unset( $purged_targets[ $canonical_key ] );
+		return true;
+	}
+
+	if ( 'check' === $action ) {
+		return ! isset( $purged_targets[ $canonical_key ] );
+	}
+
 	if ( isset( $purged_targets[ $canonical_key ] ) ) {
 		return false;
 	}
@@ -64,7 +75,7 @@ function turbo_cache_deduplicate_purge( $target, $reset = false ) {
 }
 
 /**
- * Reset request-local deduplicated purge targets.
+ * Reset request-local deduplicated purge targets across all internal registries.
  *
  * Primary testing and request boundary helper.
  *
@@ -72,6 +83,21 @@ function turbo_cache_deduplicate_purge( $target, $reset = false ) {
  */
 function turbo_cache_reset_purged_targets() {
 	turbo_cache_deduplicate_purge( '', true );
+	turbo_cache_purged_targets_registry( 'reset' );
+}
+
+/**
+ * Remove a specific target from the request-local deduplication registers.
+ *
+ * Used to unmark targets when a filesystem purge fails or when a fresh mutation
+ * occurs within a long-running batch process.
+ *
+ * @param string $target Target to unmark.
+ * @return void
+ */
+function turbo_cache_unmark_purged( $target ) {
+	turbo_cache_deduplicate_purge( $target, 'remove' );
+	turbo_cache_purged_targets_registry( 'remove', $target );
 }
 
 /**
@@ -86,8 +112,8 @@ function turbo_cache_get_purged_targets() {
 /**
  * Internal registry helper for inspecting purged targets.
  *
- * @param string $action 'get', 'set', or 'reset'.
- * @param string $target Target to register when action is 'set'.
+ * @param string $action 'get', 'set', 'remove', or 'reset'.
+ * @param string $target Target to register when action is 'set' or remove when 'remove'.
  * @return array<string,bool> Current map of registered targets.
  */
 function turbo_cache_purged_targets_registry( $action = 'get', $target = '' ) {
@@ -95,6 +121,13 @@ function turbo_cache_purged_targets_registry( $action = 'get', $target = '' ) {
 
 	if ( 'reset' === $action ) {
 		$targets = array();
+		return $targets;
+	}
+
+	if ( 'remove' === $action && '' !== $target ) {
+		$key = strtolower( str_replace( '\\', '/', trim( $target ) ) );
+		$key = rtrim( $key, '/' );
+		unset( $targets[ $key ] );
 		return $targets;
 	}
 
@@ -148,14 +181,36 @@ function turbo_cache_normalize_invalidation_target( $url_or_path, $host = null )
  * @return bool True if safe, false otherwise.
  */
 function turbo_cache_is_safe_purge_dir( $dir ) {
-	global $cache_path;
+	global $cache_path, $cached_direct_pages;
 
 	if ( empty( $dir ) || ! is_string( $dir ) ) {
 		return false;
 	}
 
+	$in_cache = false;
 	if ( function_exists( 'wpsc_is_in_cache_directory' ) ) {
-		if ( ! wpsc_is_in_cache_directory( $dir ) ) {
+		$in_cache = wpsc_is_in_cache_directory( $dir );
+	}
+
+	// If not inside standard cache directory, check if it is an authorized direct-page directory under ABSPATH.
+	if ( ! $in_cache ) {
+		$is_direct_dir = false;
+		if ( is_array( $cached_direct_pages ) && defined( 'ABSPATH' ) && '' !== ABSPATH ) {
+			$rp_d         = realpath( $dir );
+			$norm_dir     = trailingslashit( str_replace( '\\', '/', false !== $rp_d ? $rp_d : $dir ) );
+			$rp_abs       = realpath( ABSPATH );
+			$norm_abspath = trailingslashit( str_replace( '\\', '/', false !== $rp_abs ? $rp_abs : ABSPATH ) );
+			if ( $norm_dir !== $norm_abspath && str_starts_with( $norm_dir, $norm_abspath ) ) {
+				foreach ( $cached_direct_pages as $page ) {
+					$norm_page = trim( (string) $page, '/' );
+					if ( '' !== $norm_page && $norm_dir === $norm_abspath . $norm_page . '/' ) {
+						$is_direct_dir = true;
+						break;
+					}
+				}
+			}
+		}
+		if ( ! $is_direct_dir ) {
 			return false;
 		}
 	}
@@ -176,6 +231,9 @@ function turbo_cache_is_safe_purge_dir( $dir ) {
 			trailingslashit( str_replace( '\\', '/', $base_cache . 'blogs' ) ),
 			trailingslashit( str_replace( '\\', '/', $base_cache . 'supercache' ) ),
 		);
+		if ( defined( 'ABSPATH' ) && '' !== ABSPATH ) {
+			$protected[] = trailingslashit( str_replace( '\\', '/', ABSPATH ) );
+		}
 		foreach ( $protected as $p ) {
 			$rp_p = function_exists( 'wpsc_get_realpath' ) ? wpsc_get_realpath( $p ) : realpath( $p );
 			if ( $rp_p ) {
@@ -200,24 +258,34 @@ function turbo_cache_is_safe_purge_dir( $dir ) {
  * Removes index.html, index-https.html, .gz companions, .needs-rebuild,
  * and paginated subdirectories (page/) without touching parent or sibling caches.
  *
- * @param string $dir        Target cache storage directory.
- * @param bool   $delete_dir Optional. Whether to remove the directory if empty. Default true.
+ * @param string    $dir        Target cache storage directory.
+ * @param bool      $delete_dir Optional. Whether to remove the directory if empty. Default true.
+ * @param bool|null $success    Optional by-ref parameter set to true on success, false on I/O error.
  * @return int Number of cache files unlinked.
  */
-function turbo_cache_purge_storage_dir( $dir, $delete_dir = true ) {
+function turbo_cache_purge_storage_dir( $dir, $delete_dir = true, &$success = null ) {
+	$success = true;
+
 	if ( ! is_dir( $dir ) ) {
 		return 0;
 	}
 
 	if ( ! turbo_cache_is_safe_purge_dir( $dir ) ) {
+		$success = false;
 		return 0;
 	}
 
 	$dir     = trailingslashit( str_replace( '\\', '/', $dir ) );
 	$deleted = 0;
 
+	// Direct page directories under ABSPATH must never have their directory unlinked.
+	if ( $delete_dir && defined( 'ABSPATH' ) && '' !== ABSPATH && str_starts_with( $dir, trailingslashit( str_replace( '\\', '/', ABSPATH ) ) ) && ! str_contains( $dir, '/cache/' ) ) {
+		$delete_dir = false;
+	}
+
 	$handle = @opendir( $dir );
 	if ( ! $handle ) {
+		$success = false;
 		return 0;
 	}
 
@@ -240,11 +308,17 @@ function turbo_cache_purge_storage_dir( $dir, $delete_dir = true ) {
 			) {
 				if ( @unlink( $filepath ) ) {
 					++$deleted;
+				} else {
+					$success = false;
 				}
 			}
 		} elseif ( is_dir( $filepath ) && 'page' === $file ) {
 			// Targeted pagination archive directory underneath this target.
-			$deleted += turbo_cache_purge_storage_dir( $filepath, true );
+			$page_success = true;
+			$deleted     += turbo_cache_purge_storage_dir( $filepath, true, $page_success );
+			if ( ! $page_success ) {
+				$success = false;
+			}
 			@rmdir( $filepath );
 		}
 	}
@@ -283,17 +357,26 @@ function turbo_cache_purge_url( $url ) {
 	if ( ! turbo_cache_deduplicate_purge( 'url:' . $target_key ) ) {
 		return false;
 	}
-	turbo_cache_purged_targets_registry( 'set', 'url:' . $target_key );
 
 	// Resolve the absolute cache storage directory.
 	$host = (string) parse_url( $url, PHP_URL_HOST );
 	$path = (string) parse_url( $url, PHP_URL_PATH );
 	if ( '' === $path ) {
-		$path = $url;
+		$path = '/';
 	}
 
+	$delete_dir  = ( '/' !== $path );
 	$storage_dir = turbo_cache_get_storage_dir( $path, $host );
-	turbo_cache_purge_storage_dir( $storage_dir, true );
+	$success     = true;
+
+	turbo_cache_purge_storage_dir( $storage_dir, $delete_dir, $success );
+
+	if ( ! $success ) {
+		turbo_cache_unmark_purged( 'url:' . $target_key );
+		return false;
+	}
+
+	turbo_cache_purged_targets_registry( 'set', 'url:' . $target_key );
 
 	if ( function_exists( 'do_action' ) ) {
 		do_action( 'wpsc_purge_url', $url );
@@ -531,4 +614,115 @@ function turbo_cache_post_status_transition( $new_status, $old_status, $post ) {
 	}
 
 	return turbo_cache_invalidate_post( $post->ID );
+}
+
+/**
+ * Resolve public permalink specifically from post object properties.
+ *
+ * Avoids constructing previous URLs by string substitution on new permalinks.
+ *
+ * @param WP_Post|object $post Post object to resolve URL for.
+ * @return string|false Resolved public URL, or false on failure.
+ */
+function turbo_cache_resolve_post_object_url( $post ) {
+	if ( ! is_object( $post ) || empty( $post->post_name ) ) {
+		return false;
+	}
+
+	$home = function_exists( 'get_option' ) ? (string) get_option( 'home' ) : '';
+
+	// 1. Hierarchical pages: walk parent hierarchy.
+	if ( 'page' === $post->post_type ) {
+		$parent_id = isset( $post->post_parent ) ? (int) $post->post_parent : 0;
+		if ( $parent_id > 0 ) {
+			$parent_url = function_exists( 'get_permalink' ) ? get_permalink( $parent_id ) : false;
+			if ( $parent_url ) {
+				return trailingslashit( $parent_url ) . $post->post_name . '/';
+			}
+		}
+		if ( '' !== $home ) {
+			return trailingslashit( $home ) . $post->post_name . '/';
+		}
+	}
+
+	// 2. Standard posts: resolve via sample permalink structure with original post object.
+	if ( ! function_exists( 'get_sample_permalink' ) && defined( 'ABSPATH' ) && file_exists( ABSPATH . 'wp-admin/includes/post.php' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
+
+	if ( function_exists( 'get_sample_permalink' ) ) {
+		list( $structure ) = get_sample_permalink( $post, null, $post->post_name );
+		if ( ! empty( $structure ) ) {
+			return str_replace( array( '%postname%', '%pagename%' ), $post->post_name, $structure );
+		}
+	}
+
+	// 3. Fallback: get_permalink with post object.
+	if ( function_exists( 'get_permalink' ) ) {
+		$url = get_permalink( $post );
+		if ( $url && ! str_contains( (string) $url, '?p=' ) ) {
+			return $url;
+		}
+	}
+
+	if ( '' !== $home ) {
+		return trailingslashit( $home ) . $post->post_name . '/';
+	}
+
+	return false;
+}
+
+/**
+ * Handle post update lifecycle invalidation, including slug and parent hierarchy changes.
+ *
+ * Connected to WordPress core 'post_updated' hook.
+ *
+ * @param int            $post_id     Post ID.
+ * @param WP_Post|object $post_after  Post object following update.
+ * @param WP_Post|object $post_before Post object prior to update.
+ * @return bool True if invalidation occurred, false otherwise.
+ */
+function turbo_cache_post_updated( $post_id, $post_after, $post_before ) {
+	if ( ! is_object( $post_after ) || ! is_object( $post_before ) ) {
+		return false;
+	}
+
+	if ( function_exists( 'get_post_type_object' ) ) {
+		$ptype = get_post_type_object( $post_after->post_type );
+		if ( empty( $ptype ) || ! $ptype->public ) {
+			return false;
+		}
+	}
+
+	$public_statuses = array( 'publish', 'private' );
+	$was_public      = in_array( $post_before->post_status, $public_statuses, true );
+	$is_public       = in_array( $post_after->post_status, $public_statuses, true );
+
+	if ( ! $was_public && ! $is_public ) {
+		return false;
+	}
+
+	// Unmark targets from previous mutations to support repeated updates in WP-CLI or batch processes.
+	$new_url = turbo_cache_get_post_canonical_url( $post_after );
+	if ( $new_url ) {
+		$new_key = turbo_cache_normalize_invalidation_target( $new_url );
+		turbo_cache_unmark_purged( 'url:' . $new_key );
+	}
+	turbo_cache_unmark_purged( 'homepage:0' );
+
+	// Detect if slug, parent hierarchy, or date changed while previous state was public.
+	$slug_changed   = ( $post_before->post_name !== $post_after->post_name );
+	$parent_changed = ( (int) $post_before->post_parent !== (int) $post_after->post_parent );
+	$date_changed   = ( $post_before->post_date !== $post_after->post_date );
+
+	if ( $was_public && ( $slug_changed || $parent_changed || $date_changed ) ) {
+		$old_url = turbo_cache_resolve_post_object_url( $post_before );
+		if ( $old_url && $old_url !== $new_url ) {
+			$old_key = turbo_cache_normalize_invalidation_target( $old_url );
+			turbo_cache_unmark_purged( 'url:' . $old_key );
+			turbo_cache_purge_url( $old_url );
+		}
+	}
+
+	return turbo_cache_invalidate_post( $post_id );
 }

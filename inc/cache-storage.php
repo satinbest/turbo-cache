@@ -228,9 +228,24 @@ function turbo_cache_get_storage_dir( $uri = null, $host = null, $cache_path = n
 	}
 
 	$dir = $cache_path . 'supercache/' . $dir . '/';
-	if ( is_array( $cached_direct_pages ) && isset( $_SERVER['REQUEST_URI'] ) && in_array( $_SERVER['REQUEST_URI'], $cached_direct_pages, true ) ) {
-		$base_dir = defined( 'ABSPATH' ) ? ABSPATH : '';
-		$dir      = $base_dir . $identity['path'] . '/';
+	if ( is_array( $cached_direct_pages ) ) {
+		$uri_path  = $identity['path'];
+		$norm_uri  = '/' . trim( $uri_path, '/' ) . '/';
+		$is_direct = false;
+		foreach ( $cached_direct_pages as $page ) {
+			$norm_page = '/' . trim( (string) $page, '/' ) . '/';
+			if ( $norm_uri === $norm_page ) {
+				$is_direct = true;
+				break;
+			}
+		}
+		if ( ! $is_direct && isset( $_SERVER['REQUEST_URI'] ) && in_array( $_SERVER['REQUEST_URI'], $cached_direct_pages, true ) ) {
+			$is_direct = true;
+		}
+		if ( $is_direct ) {
+			$base_dir = defined( 'ABSPATH' ) ? ABSPATH : '';
+			$dir      = $base_dir . trim( $uri_path, '/' ) . '/';
+		}
 	}
 	$dir = str_replace( '..', '', str_replace( '//', '/', $dir ) );
 

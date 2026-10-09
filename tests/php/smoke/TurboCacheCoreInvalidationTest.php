@@ -15,6 +15,10 @@ require_once dirname( __DIR__, 3 ) . '/inc/cache-invalidation.php';
 
 use PHPUnit\Framework\TestCase;
 
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', sys_get_temp_dir() . '/turbo_test_abspath/' );
+}
+
 if ( ! function_exists( 'trailingslashit' ) ) {
 	/**
 	 * Test double for WordPress trailingslashit().
@@ -84,6 +88,64 @@ if ( ! function_exists( 'get_post_type_object' ) ) {
 	}
 }
 
+if ( ! function_exists( 'current_filter' ) ) {
+	/**
+	 * Test double for WordPress current_filter().
+	 *
+	 * @return string
+	 */
+	function current_filter() {
+		return isset( $GLOBALS['wpsc_test_current_filter'] ) ? $GLOBALS['wpsc_test_current_filter'] : '';
+	}
+}
+
+if ( ! function_exists( 'get_post_status' ) ) {
+	/**
+	 * Test double for WordPress get_post_status().
+	 *
+	 * @param mixed $post Post ID or object.
+	 * @return string|false
+	 */
+	function get_post_status( $post = null ) {
+		if ( is_object( $post ) && isset( $post->post_status ) ) {
+			return $post->post_status;
+		}
+		$p = get_post( $post );
+		return $p ? $p->post_status : false;
+	}
+}
+
+if ( ! function_exists( 'get_post_meta' ) ) {
+	/**
+	 * Test double for WordPress get_post_meta().
+	 *
+	 * @param int    $post_id Post ID.
+	 * @param string $key     Meta key.
+	 * @param bool   $single  Whether single value.
+	 * @return mixed
+	 */
+	function get_post_meta( $post_id, $key = '', $single = false ) {
+		unset( $single );
+		$id = (int) $post_id;
+		return isset( $GLOBALS['wpsc_test_post_meta'][ $id ][ $key ] ) ? $GLOBALS['wpsc_test_post_meta'][ $id ][ $key ] : '';
+	}
+}
+
+if ( ! function_exists( 'get_sample_permalink' ) ) {
+	/**
+	 * Test double for WordPress get_sample_permalink().
+	 *
+	 * @param mixed       $post  Post object or ID.
+	 * @param string|null $title Post title.
+	 * @param string|null $name  Post slug.
+	 * @return array{0:string,1:string}
+	 */
+	function get_sample_permalink( $post, $title = null, $name = null ) {
+		$slug = ( null !== $name && '' !== $name ) ? $name : ( is_object( $post ) && ! empty( $post->post_name ) ? $post->post_name : 'sample' );
+		return array( 'http://example.com/%postname%/', $slug );
+	}
+}
+
 /**
  * Tests for inc/cache-invalidation.php core primitives and WordPress hook invalidation.
  *
@@ -127,15 +189,19 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 			'page_on_front'  => 0,
 			'page_for_posts' => 0,
 		);
-		$GLOBALS['wpsc_test_posts']      = array();
-		$GLOBALS['wpsc_test_permalinks'] = array();
+		$GLOBALS['wpsc_test_posts']          = array();
+		$GLOBALS['wpsc_test_permalinks']     = array();
+		$GLOBALS['wpsc_test_post_meta']      = array();
+		$GLOBALS['wpsc_test_current_filter'] = '';
+		$GLOBALS['file_prefix']              = 'wp-cache-';
 
 		unset(
 			$_SERVER['REQUEST_URI'],
 			$_SERVER['HTTPS'],
 			$_SERVER['HTTP_X_FORWARDED_PROTO'],
 			$GLOBALS['cached_direct_pages'],
-			$GLOBALS['wp_cache_request_uri']
+			$GLOBALS['wp_cache_request_uri'],
+			$GLOBALS['cache_rebuild_files']
 		);
 
 		if ( function_exists( 'remove_all_filters' ) ) {
@@ -159,8 +225,12 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 			$GLOBALS['wpsc_test_options'],
 			$GLOBALS['wpsc_test_posts'],
 			$GLOBALS['wpsc_test_permalinks'],
+			$GLOBALS['wpsc_test_post_meta'],
+			$GLOBALS['wpsc_test_current_filter'],
+			$GLOBALS['file_prefix'],
 			$GLOBALS['cached_direct_pages'],
 			$GLOBALS['wp_cache_request_uri'],
+			$GLOBALS['cache_rebuild_files'],
 			$_SERVER['REQUEST_URI'],
 			$_SERVER['HTTPS'],
 			$_SERVER['HTTP_X_FORWARDED_PROTO']
@@ -609,5 +679,323 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 		// Third explicit purge attempt for the same URL is deduplicated at gate
 		$this->assertFalse( turbo_cache_purge_url( 'http://example.com/multi-hook/' ) );
 		$this->assertFalse( turbo_cache_invalidate_homepage() );
+	}
+
+	// -------------------------------------------------------------------------
+	// 11. Phase 5B Corrective Regression Tests
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Regression 1: Changing a published post slug invalidates old and new URLs.
+	 */
+	public function test_post_slug_change_invalidates_old_and_new_urls(): void {
+		$post_id     = 701;
+		$post_before = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Original Title',
+			'post_name'   => 'original-slug',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-09 10:00:00',
+			'post_parent' => 0,
+		);
+		$post_after  = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'New Title',
+			'post_name'   => 'new-slug',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-09 10:00:00',
+			'post_parent' => 0,
+		);
+
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post_after;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/new-slug/';
+
+		$old_dir       = $this->create_cache_fixture( '/original-slug/' );
+		$new_dir       = $this->create_cache_fixture( '/new-slug/' );
+		$unrelated_dir = $this->create_cache_fixture( '/unrelated-post/' );
+
+		$this->assertFileExists( $old_dir . 'index.html' );
+		$this->assertFileExists( $new_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+
+		$res = turbo_cache_post_updated( $post_id, $post_after, $post_before );
+		$this->assertTrue( $res );
+
+		// Old URL cache is removed
+		$this->assertFileDoesNotExist( $old_dir . 'index.html' );
+		// New URL cache is removed
+		$this->assertFileDoesNotExist( $new_dir . 'index.html' );
+		// Unrelated post cache is preserved
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 2: Changing a hierarchical page parent invalidates old and new hierarchy URLs.
+	 */
+	public function test_page_parent_change_invalidates_old_and_new_urls(): void {
+		$parent_old_id = 801;
+		$parent_new_id = 802;
+		$page_id       = 803;
+
+		$GLOBALS['wpsc_test_permalinks'][ $parent_old_id ] = 'http://example.com/company/';
+		$GLOBALS['wpsc_test_permalinks'][ $parent_new_id ] = 'http://example.com/about/';
+
+		$page_before = (object) array(
+			'ID'          => $page_id,
+			'post_title'  => 'Our Team',
+			'post_name'   => 'team',
+			'post_type'   => 'page',
+			'post_status' => 'publish',
+			'post_parent' => $parent_old_id,
+			'post_date'   => '2026-10-09 10:00:00',
+		);
+		$page_after  = (object) array(
+			'ID'          => $page_id,
+			'post_title'  => 'Our Team',
+			'post_name'   => 'team',
+			'post_type'   => 'page',
+			'post_status' => 'publish',
+			'post_parent' => $parent_new_id,
+			'post_date'   => '2026-10-09 10:00:00',
+		);
+
+		$GLOBALS['wpsc_test_posts'][ $page_id ]      = $page_after;
+		$GLOBALS['wpsc_test_permalinks'][ $page_id ] = 'http://example.com/about/team/';
+
+		$old_dir       = $this->create_cache_fixture( '/company/team/' );
+		$new_dir       = $this->create_cache_fixture( '/about/team/' );
+		$unrelated_dir = $this->create_cache_fixture( '/company/' );
+
+		$this->assertFileExists( $old_dir . 'index.html' );
+		$this->assertFileExists( $new_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+
+		$res = turbo_cache_post_updated( $page_id, $page_after, $page_before );
+		$this->assertTrue( $res );
+
+		// Old hierarchical URL cache is removed
+		$this->assertFileDoesNotExist( $old_dir . 'index.html' );
+		// New hierarchical URL cache is removed
+		$this->assertFileDoesNotExist( $new_dir . 'index.html' );
+		// Unrelated parent page is preserved
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 3: Permanent deletion from Trash for a previously published post purges cache.
+	 */
+	public function test_permanent_deletion_from_trash_purges_cache(): void {
+		$post_id = 901;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Trashed Post',
+			'post_name'   => 'trashed-post',
+			'post_type'   => 'post',
+			'post_status' => 'trash',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]                               = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ]                          = 'http://example.com/?p=901';
+		$GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] = 'publish';
+		$GLOBALS['wpsc_test_current_filter']                                  = 'delete_post';
+
+		$dir = $this->create_cache_fixture( '/trashed-post/' );
+		$this->assertFileExists( $dir . 'index.html' );
+
+		wp_cache_post_edit( $post_id );
+
+		// Cache for previously published post is purged on permanent deletion
+		$this->assertFileDoesNotExist( $dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 4: Permanent deletion from Trash for a draft post skips cache purge.
+	 */
+	public function test_permanent_deletion_of_draft_skips_purge(): void {
+		$post_id = 902;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Draft Post',
+			'post_name'   => 'draft-post',
+			'post_type'   => 'post',
+			'post_status' => 'trash',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]                               = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ]                          = 'http://example.com/?p=902';
+		$GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] = 'draft';
+		$GLOBALS['wpsc_test_current_filter']                                  = 'delete_post';
+
+		$dir = $this->create_cache_fixture( '/draft-post/' );
+		$this->assertFileExists( $dir . 'index.html' );
+
+		wp_cache_post_edit( $post_id );
+
+		// Never-published draft files are not purged through public cache hook
+		$this->assertFileExists( $dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 5: Failed filesystem purge does not permanently suppress retry.
+	 */
+	public function test_failed_purge_does_not_suppress_retry(): void {
+		$dir  = $this->create_cache_fixture( '/locked-test/' );
+		$file = $dir . 'index.html';
+		$this->assertFileExists( $file );
+
+		// Set read-only permissions to simulate I/O failure on unlink.
+		chmod( $file, 0444 );
+
+		$purged = turbo_cache_purge_url( 'http://example.com/locked-test/' );
+		$this->assertFalse( $purged );
+		// Target must NOT be permanently marked as purged.
+		$this->assertTrue( turbo_cache_deduplicate_purge( 'url:example.com/locked-test', 'check' ) );
+
+		// Restore write permissions. Retry should now succeed.
+		chmod( $file, 0666 );
+		$retry = turbo_cache_purge_url( 'http://example.com/locked-test/' );
+		$this->assertTrue( $retry );
+		$this->assertFileDoesNotExist( $file );
+
+		// Also verify unsafe directory purge reports failure without exceptions.
+		$outside_dir = sys_get_temp_dir() . '/turbo_unsafe_' . uniqid();
+		mkdir( $outside_dir, 0777, true );
+		$success = null;
+		$deleted = turbo_cache_purge_storage_dir( $outside_dir, true, $success );
+		$this->assertSame( 0, $deleted );
+		$this->assertFalse( $success );
+		@rmdir( $outside_dir );
+	}
+
+	/**
+	 * Regression 6: Repeated mutations of the same post in long-running process can invalidate again.
+	 */
+	public function test_repeated_mutation_in_same_process_can_invalidate_again(): void {
+		$post_id = 905;
+		$post1   = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Title Version 1',
+			'post_name'   => 'test-article',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-09 10:00:00',
+			'post_parent' => 0,
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post1;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/test-article/';
+
+		$dir = $this->create_cache_fixture( '/test-article/' );
+		$this->assertFileExists( $dir . 'index.html' );
+
+		// Mutation 1
+		turbo_cache_post_updated( $post_id, $post1, $post1 );
+		$this->assertFileDoesNotExist( $dir . 'index.html' );
+
+		// Recreate cache (simulating regeneration)
+		$this->create_cache_fixture( '/test-article/' );
+		$this->assertFileExists( $dir . 'index.html' );
+
+		// Mutation 2 in the same PHP process
+		$post2 = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Title Version 2',
+			'post_name'   => 'test-article',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-09 10:05:00',
+			'post_parent' => 0,
+		);
+		turbo_cache_post_updated( $post_id, $post2, $post1 );
+		$this->assertFileDoesNotExist( $dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 7: turbo_cache_reset_purged_targets clears both registries consistently.
+	 */
+	public function test_reset_purged_targets_clears_both_registries(): void {
+		$this->create_cache_fixture( '/test-registry/' );
+		turbo_cache_purge_url( 'http://example.com/test-registry/' );
+
+		$targets = turbo_cache_get_purged_targets();
+		$this->assertArrayHasKey( 'url:example.com/test-registry', $targets );
+		$this->assertFalse( turbo_cache_deduplicate_purge( 'url:example.com/test-registry', 'check' ) );
+
+		turbo_cache_reset_purged_targets();
+
+		$cleared_targets = turbo_cache_get_purged_targets();
+		$this->assertEmpty( $cleared_targets );
+		$this->assertTrue( turbo_cache_deduplicate_purge( 'url:example.com/test-registry', 'check' ) );
+	}
+
+	/**
+	 * Regression 8: Root URLs normalize path to slash without scheme corruption.
+	 */
+	public function test_root_url_path_fallback_normalizes_to_slash(): void {
+		$home_dir = $this->create_cache_fixture( '/' );
+		$this->assertFileExists( $home_dir . 'index.html' );
+
+		// Purge root URL without trailing slash
+		$purged = turbo_cache_purge_url( 'http://example.com' );
+		$this->assertTrue( $purged );
+		$this->assertFileDoesNotExist( $home_dir . 'index.html' );
+		// Root directory itself remains
+		$this->assertDirectoryExists( $home_dir );
+
+		// Target normalization check for various root formats
+		$this->assertSame( 'example.com/', turbo_cache_normalize_invalidation_target( 'http://example.com' ) );
+		$this->assertSame( 'example.com/', turbo_cache_normalize_invalidation_target( 'https://example.com:8080' ) );
+		$this->assertSame( 'example.com/', turbo_cache_normalize_invalidation_target( 'http://example.com/' ) );
+	}
+
+	/**
+	 * Regression 9: Direct-page cache invalidation from admin/CLI context without REQUEST_URI dependency.
+	 */
+	public function test_direct_page_cache_invalidation_from_admin_context(): void {
+		$GLOBALS['cached_direct_pages'] = array( '/direct-page/' );
+		$_SERVER['REQUEST_URI']         = '/wp-admin/post.php';
+
+		// Create mock direct page in ABSPATH
+		$direct_dir = ABSPATH . 'direct-page/';
+		if ( ! is_dir( $direct_dir ) ) {
+			mkdir( $direct_dir, 0777, true );
+		}
+		file_put_contents( $direct_dir . 'index.html', 'direct cached content' );
+		$this->assertFileExists( $direct_dir . 'index.html' );
+
+		// Storage directory resolves to ABSPATH based on URI path
+		$storage_dir = turbo_cache_get_storage_dir( '/direct-page/', 'example.com', $this->test_cache_dir . '/' );
+		$this->assertSame( str_replace( '\\', '/', $direct_dir ), str_replace( '\\', '/', $storage_dir ) );
+
+		$success = null;
+		$deleted = turbo_cache_purge_storage_dir( $storage_dir, true, $success );
+		$this->assertSame( 1, $deleted );
+		$this->assertTrue( $success );
+		$this->assertFileDoesNotExist( $direct_dir . 'index.html' );
+		// Ensure direct page folder under ABSPATH was preserved and not unlinked
+		$this->assertDirectoryExists( $direct_dir );
+
+		@rmdir( $direct_dir );
+	}
+
+	/**
+	 * Regression 10: wpsc_delete_url_cache preserves rebuild staging when cache_rebuild_files is enabled.
+	 */
+	public function test_wpsc_delete_url_cache_rebuild_compatibility(): void {
+		$dir = $this->create_cache_fixture( '/rebuild-test/' );
+		$this->assertFileExists( $dir . 'index.html' );
+
+		// Mode A: Rebuild enabled
+		$GLOBALS['cache_rebuild_files'] = 1;
+		$res_rebuild                    = wpsc_delete_url_cache( 'http://example.com/rebuild-test/' );
+		$this->assertTrue( $res_rebuild );
+		$this->assertFileDoesNotExist( $dir . 'index.html' );
+		$this->assertFileExists( $dir . 'index.html.needs-rebuild' );
+
+		// Mode B: Standard purge (rebuild disabled)
+		$GLOBALS['cache_rebuild_files'] = 0;
+		turbo_cache_reset_purged_targets();
+		$res_purge = wpsc_delete_url_cache( 'http://example.com/rebuild-test/' );
+		$this->assertTrue( $res_purge );
+		$this->assertFileDoesNotExist( $dir . 'index.html.needs-rebuild' );
 	}
 }
