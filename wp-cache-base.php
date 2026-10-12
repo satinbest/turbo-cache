@@ -13,6 +13,9 @@ if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
 	// disagree with web requests about where the cache lives. See #1081.
 	// phpcs:ignore WordPress.NamingConventions.ValidVariableName.VariableNotSnakeCase
 	$WPSC_HTTP_HOST = function_exists( 'mb_strtolower' ) ? mb_strtolower( $WPSC_HTTP_HOST ) : strtolower( $WPSC_HTTP_HOST );
+	if ( false === $cache_enabled && ! empty( $GLOBALS['wp_cache_config_file'] ) && file_exists( $GLOBALS['wp_cache_config_file'] ) ) {
+		include $GLOBALS['wp_cache_config_file'];
+	}
 } else {
 	$cache_enabled  = false;
 	$WPSC_HTTP_HOST = '';

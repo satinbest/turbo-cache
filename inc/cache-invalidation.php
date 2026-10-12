@@ -403,7 +403,6 @@ function turbo_cache_invalidate_homepage( $blog_id = 0 ) {
 	if ( ! turbo_cache_deduplicate_purge( $canonical_tag ) ) {
 		return false;
 	}
-	turbo_cache_purged_targets_registry( 'set', $canonical_tag );
 
 	$homepage_dir = '';
 	if ( function_exists( 'get_supercache_dir' ) ) {
@@ -415,19 +414,33 @@ function turbo_cache_invalidate_homepage( $blog_id = 0 ) {
 	}
 
 	if ( '' === $homepage_dir || ! is_dir( $homepage_dir ) ) {
+		turbo_cache_purged_targets_registry( 'set', $canonical_tag );
 		return true;
 	}
 
+	$success = true;
+
 	// Purge homepage static files directly within root supercache directory.
 	// We pass $delete_dir = false so the directory containing subpage folders is NOT removed!
-	turbo_cache_purge_storage_dir( $homepage_dir, false );
+	turbo_cache_purge_storage_dir( $homepage_dir, false, $success );
 
 	// Also purge paginated front page archives if present: supercache/{host}/page/
 	$page_dir = trailingslashit( $homepage_dir ) . 'page/';
 	if ( is_dir( $page_dir ) ) {
-		turbo_cache_purge_storage_dir( $page_dir, true );
+		$page_success = true;
+		turbo_cache_purge_storage_dir( $page_dir, true, $page_success );
+		if ( ! $page_success ) {
+			$success = false;
+		}
 		@rmdir( $page_dir );
 	}
+
+	if ( ! $success ) {
+		turbo_cache_unmark_purged( $canonical_tag );
+		return false;
+	}
+
+	turbo_cache_purged_targets_registry( 'set', $canonical_tag );
 
 	if ( function_exists( 'do_action' ) ) {
 		do_action( 'gc_cache', 'prune', 'homepage' );
@@ -629,6 +642,11 @@ function turbo_cache_resolve_post_object_url( $post ) {
 		return false;
 	}
 
+	$clean_slug = preg_replace( '/__trashed.*$/', '', (string) $post->post_name );
+	if ( '' === $clean_slug ) {
+		return false;
+	}
+
 	$home = function_exists( 'get_option' ) ? (string) get_option( 'home' ) : '';
 
 	// 1. Hierarchical pages: walk parent hierarchy.
@@ -637,11 +655,11 @@ function turbo_cache_resolve_post_object_url( $post ) {
 		if ( $parent_id > 0 ) {
 			$parent_url = function_exists( 'get_permalink' ) ? get_permalink( $parent_id ) : false;
 			if ( $parent_url ) {
-				return trailingslashit( $parent_url ) . $post->post_name . '/';
+				return trailingslashit( $parent_url ) . $clean_slug . '/';
 			}
 		}
 		if ( '' !== $home ) {
-			return trailingslashit( $home ) . $post->post_name . '/';
+			return trailingslashit( $home ) . $clean_slug . '/';
 		}
 	}
 
@@ -651,22 +669,30 @@ function turbo_cache_resolve_post_object_url( $post ) {
 	}
 
 	if ( function_exists( 'get_sample_permalink' ) ) {
-		list( $structure ) = get_sample_permalink( $post, null, $post->post_name );
-		if ( ! empty( $structure ) ) {
-			return str_replace( array( '%postname%', '%pagename%' ), $post->post_name, $structure );
+		// Trashed posts cause core get_sample_permalink to return ?p=ID.
+		// Temporarily use clean status and slug on a clone to extract the canonical structure.
+		$sample_post = $post;
+		if ( 'trash' === $post->post_status ) {
+			$sample_post              = clone $post;
+			$sample_post->post_status = 'publish';
+			$sample_post->post_name   = $clean_slug;
+		}
+		list( $structure ) = get_sample_permalink( $sample_post, null, $clean_slug );
+		if ( ! empty( $structure ) && ! str_contains( $structure, '?p=' ) && ! str_contains( $structure, '?page_id=' ) ) {
+			return str_replace( array( '%postname%', '%pagename%' ), $clean_slug, $structure );
 		}
 	}
 
 	// 3. Fallback: get_permalink with post object.
 	if ( function_exists( 'get_permalink' ) ) {
 		$url = get_permalink( $post );
-		if ( $url && ! str_contains( (string) $url, '?p=' ) ) {
+		if ( $url && ! str_contains( (string) $url, '?p=' ) && ! str_contains( (string) $url, '?page_id=' ) ) {
 			return $url;
 		}
 	}
 
 	if ( '' !== $home ) {
-		return trailingslashit( $home ) . $post->post_name . '/';
+		return trailingslashit( $home ) . $clean_slug . '/';
 	}
 
 	return false;
@@ -725,4 +751,212 @@ function turbo_cache_post_updated( $post_id, $post_after, $post_before ) {
 	}
 
 	return turbo_cache_invalidate_post( $post_id );
+}
+
+/**
+ * Handle permanent deletion from WordPress before post data and metadata are removed.
+ *
+ * Connected to WordPress core 'before_delete_post' hook.
+ *
+ * @param int            $post_id Post ID.
+ * @param WP_Post|object $post    Optional. Post object.
+ * @return bool True if invalidation occurred, false otherwise.
+ */
+function turbo_cache_before_delete_post( $post_id, $post = null ) {
+	if ( ! is_object( $post ) && function_exists( 'get_post' ) ) {
+		$post = get_post( $post_id );
+	}
+
+	if ( ! is_object( $post ) || empty( $post->ID ) ) {
+		return false;
+	}
+
+	if ( function_exists( 'get_post_type_object' ) ) {
+		$ptype = get_post_type_object( $post->post_type );
+		if ( empty( $ptype ) || ! $ptype->public ) {
+			return false;
+		}
+	}
+
+	$public_statuses = array( 'publish', 'private' );
+
+	// 1. Post is permanently deleted from Trash:
+	if ( 'trash' === $post->post_status ) {
+		$orig_status = function_exists( 'get_post_meta' ) ? (string) get_post_meta( $post_id, '_wp_trash_meta_status', true ) : '';
+		// If the post was never published (e.g. draft, auto-draft), skip public cache invalidation.
+		if ( ! in_array( $orig_status, $public_statuses, true ) ) {
+			return false;
+		}
+
+		$clean_slug             = preg_replace( '/__trashed.*$/', '', (string) $post->post_name );
+		$orig_post              = clone $post;
+		$orig_post->post_status = $orig_status;
+		$orig_post->post_name   = $clean_slug;
+
+		$orig_url = turbo_cache_resolve_post_object_url( $orig_post );
+		if ( $orig_url ) {
+			$orig_key = turbo_cache_normalize_invalidation_target( $orig_url );
+			turbo_cache_unmark_purged( 'url:' . $orig_key );
+			turbo_cache_purge_url( $orig_url );
+		}
+
+		if ( turbo_cache_post_affects_homepage( $orig_post ) ) {
+			turbo_cache_unmark_purged( 'homepage:0' );
+			turbo_cache_invalidate_homepage();
+		}
+
+		if ( function_exists( 'wpsc_delete_post_archives' ) ) {
+			wpsc_delete_post_archives( $orig_post );
+		}
+
+		return true;
+	}
+
+	// 2. Post is permanently deleted directly without going through Trash:
+	if ( in_array( $post->post_status, $public_statuses, true ) ) {
+		$url = turbo_cache_resolve_post_object_url( $post );
+		if ( $url ) {
+			$key = turbo_cache_normalize_invalidation_target( $url );
+			turbo_cache_unmark_purged( 'url:' . $key );
+		}
+		turbo_cache_unmark_purged( 'homepage:0' );
+		return turbo_cache_invalidate_post( $post_id );
+	}
+
+	return false;
+}
+
+/**
+ * Handle taxonomy term assignment changes that alter permalink structures (e.g. %category%).
+ *
+ * Connected to WordPress core 'set_object_terms' hook.
+ *
+ * @param int    $object_id  Post or object ID.
+ * @param array  $terms      New terms array.
+ * @param array  $tt_ids     New term taxonomy IDs.
+ * @param string $taxonomy   Taxonomy slug.
+ * @param bool   $append     Whether terms were appended.
+ * @param array  $old_tt_ids Old term taxonomy IDs before mutation.
+ * @return void
+ */
+function turbo_cache_terms_changed( $object_id, $terms, $tt_ids, $taxonomy, $append, $old_tt_ids ) {
+	if ( 'category' !== $taxonomy ) {
+		return;
+	}
+
+	// If old and new terms are identical, no permalink transition occurred.
+	if ( (array) $old_tt_ids === (array) $tt_ids ) {
+		return;
+	}
+
+	$post = function_exists( 'get_post' ) ? get_post( $object_id ) : null;
+	if ( ! is_object( $post ) || ! in_array( $post->post_status, array( 'publish', 'private' ), true ) ) {
+		return;
+	}
+
+	$structure = function_exists( 'get_option' ) ? (string) get_option( 'permalink_structure' ) : '';
+
+	// When permalink structure does not contain %category%, the URL is unchanged,
+	// but the post content (category display) and category archives must be invalidated.
+	if ( ! str_contains( $structure, '%category%' ) ) {
+		$new_url = turbo_cache_get_post_canonical_url( $post );
+		if ( $new_url ) {
+			$new_key = turbo_cache_normalize_invalidation_target( $new_url );
+			turbo_cache_unmark_purged( 'url:' . $new_key );
+		}
+		turbo_cache_invalidate_post( $object_id );
+		return;
+	}
+
+	$old_url = false;
+
+	if ( ! empty( $old_tt_ids ) ) {
+		// Resolve terms for all old taxonomy IDs to mirror WordPress core get_permalink() selection.
+		$old_terms = array();
+		foreach ( (array) $old_tt_ids as $tt_id ) {
+			$t = function_exists( 'get_term_by' ) ? get_term_by( 'term_taxonomy_id', (int) $tt_id, 'category' ) : null;
+			if ( is_object( $t ) && ( ! function_exists( 'is_wp_error' ) || ! is_wp_error( $t ) ) ) {
+				$old_terms[] = $t;
+			}
+		}
+
+		if ( ! empty( $old_terms ) ) {
+			// WordPress core sorts categories by term_id ASC and selects the first one.
+			if ( count( $old_terms ) > 1 ) {
+				usort(
+					$old_terms,
+					function ( $a, $b ) {
+						return ( (int) $a->term_id <=> (int) $b->term_id );
+					}
+				);
+			}
+
+			$old_term = $old_terms[0];
+			if ( function_exists( 'apply_filters' ) ) {
+				$filtered = apply_filters( 'post_link_category', $old_term, $old_terms, $post );
+				if ( is_object( $filtered ) && ( ! function_exists( 'is_wp_error' ) || ! is_wp_error( $filtered ) ) ) {
+					$old_term = $filtered;
+				}
+			}
+
+			$cat_path = $old_term->slug;
+			if ( function_exists( 'get_category_parents' ) ) {
+				$cat_parents = get_category_parents( $old_term->term_id, false, '/', true );
+				if ( is_string( $cat_parents ) && ( ! function_exists( 'is_wp_error' ) || ! is_wp_error( $cat_parents ) ) ) {
+					$cat_path = trim( $cat_parents, '/' );
+				}
+			}
+
+			$home = function_exists( 'home_url' ) ? home_url() : ( (string) get_option( 'home' ) );
+			$path = str_replace( '%category%', $cat_path, $structure );
+			$path = str_replace( array( '%postname%', '%pagename%' ), $post->post_name, $path );
+
+			if ( ! empty( $post->post_date ) && ( str_contains( $path, '%year%' ) || str_contains( $path, '%monthnum%' ) || str_contains( $path, '%day%' ) ) ) {
+				$date = explode( ' ', str_replace( array( '-', ':' ), ' ', (string) $post->post_date ) );
+				$path = str_replace(
+					array( '%year%', '%monthnum%', '%day%', '%hour%', '%minute%', '%second%' ),
+					array(
+						isset( $date[0] ) ? substr( $date[0], 0, 4 ) : '',
+						isset( $date[1] ) ? $date[1] : '',
+						isset( $date[2] ) ? $date[2] : '',
+						isset( $date[3] ) ? $date[3] : '',
+						isset( $date[4] ) ? $date[4] : '',
+						isset( $date[5] ) ? $date[5] : '',
+					),
+					$path
+				);
+			}
+
+			if ( str_contains( $path, '%post_id%' ) ) {
+				$path = str_replace( '%post_id%', (string) $post->ID, $path );
+			}
+
+			if ( str_contains( $path, '%author%' ) && ! empty( $post->post_author ) && function_exists( 'get_userdata' ) ) {
+				$authordata = get_userdata( $post->post_author );
+				if ( is_object( $authordata ) && ! empty( $authordata->user_nicename ) ) {
+					$path = str_replace( '%author%', $authordata->user_nicename, $path );
+				}
+			}
+
+			$old_url = trailingslashit( rtrim( (string) $home, '/' ) . '/' . ltrim( $path, '/' ) );
+		}
+	}
+
+	$new_url = turbo_cache_get_post_canonical_url( $post );
+
+	// 1. Purge old permalink when it differs from the new permalink.
+	if ( $old_url && $old_url !== $new_url ) {
+		$old_key = turbo_cache_normalize_invalidation_target( $old_url );
+		turbo_cache_unmark_purged( 'url:' . $old_key );
+		turbo_cache_purge_url( $old_url );
+	}
+
+	// 2. Invalidate new permalink, post archives, and related pages.
+	if ( $new_url ) {
+		$new_key = turbo_cache_normalize_invalidation_target( $new_url );
+		turbo_cache_unmark_purged( 'url:' . $new_key );
+	}
+	turbo_cache_unmark_purged( 'homepage:0' );
+
+	turbo_cache_invalidate_post( $object_id );
 }

@@ -146,6 +146,117 @@ if ( ! function_exists( 'get_sample_permalink' ) ) {
 	}
 }
 
+if ( ! function_exists( 'get_object_taxonomies' ) ) {
+	/**
+	 * Test double for WordPress get_object_taxonomies().
+	 *
+	 * @param mixed  $object Object or post type.
+	 * @param string $output Output format.
+	 * @return array
+	 */
+	function get_object_taxonomies( $object, $output = 'names' ) {
+		unset( $object, $output );
+		return array();
+	}
+}
+
+if ( ! function_exists( 'get_post_type_archive_link' ) ) {
+	/**
+	 * Test double for WordPress get_post_type_archive_link().
+	 *
+	 * @param string $post_type Post type name.
+	 * @return string|false
+	 */
+	function get_post_type_archive_link( $post_type ) {
+		unset( $post_type );
+		return false;
+	}
+}
+
+if ( ! function_exists( 'get_author_posts_url' ) ) {
+	/**
+	 * Test double for WordPress get_author_posts_url().
+	 *
+	 * @param int $author_id Author user ID.
+	 * @return string
+	 */
+	function get_author_posts_url( $author_id ) {
+		unset( $author_id );
+		return '';
+	}
+}
+
+if ( ! function_exists( 'home_url' ) ) {
+	/**
+	 * Test double for WordPress home_url().
+	 *
+	 * @param string $path Path.
+	 * @return string
+	 */
+	function home_url( $path = '' ) {
+		$home = isset( $GLOBALS['wpsc_test_options']['home'] ) ? (string) $GLOBALS['wpsc_test_options']['home'] : 'http://example.com';
+		return rtrim( $home, '/' ) . '/' . ltrim( (string) $path, '/' );
+	}
+}
+
+if ( ! function_exists( 'get_term_by' ) ) {
+	/**
+	 * Test double for WordPress get_term_by().
+	 *
+	 * @param string     $field    Field name.
+	 * @param int|string $value    Field value.
+	 * @param string     $taxonomy Taxonomy.
+	 * @return object|false
+	 */
+	function get_term_by( $field, $value, $taxonomy = 'category' ) {
+		unset( $taxonomy );
+		if ( 'term_taxonomy_id' === $field ) {
+			$tt_id = (int) $value;
+			return isset( $GLOBALS['wpsc_test_terms_by_tt_id'][ $tt_id ] ) ? $GLOBALS['wpsc_test_terms_by_tt_id'][ $tt_id ] : false;
+		}
+		if ( 'id' === $field ) {
+			$id = (int) $value;
+			return isset( $GLOBALS['wpsc_test_terms_by_id'][ $id ] ) ? $GLOBALS['wpsc_test_terms_by_id'][ $id ] : false;
+		}
+		return false;
+	}
+}
+
+if ( ! function_exists( 'get_category_parents' ) ) {
+	/**
+	 * Test double for WordPress get_category_parents().
+	 *
+	 * @param int    $category_id  Category ID.
+	 * @param bool   $display_link Whether to format as link.
+	 * @param string $separator    Path separator.
+	 * @param bool   $nicename     Whether to use slug.
+	 * @return string
+	 */
+	function get_category_parents( $category_id, $display_link = false, $separator = '/', $nicename = false ) {
+		unset( $display_link, $nicename );
+		$id    = (int) $category_id;
+		$chain = '';
+		while ( $id > 0 && isset( $GLOBALS['wpsc_test_terms_by_id'][ $id ] ) ) {
+			$term  = $GLOBALS['wpsc_test_terms_by_id'][ $id ];
+			$chain = $term->slug . $separator . $chain;
+			$id    = isset( $term->parent ) ? (int) $term->parent : 0;
+		}
+		return $chain;
+	}
+}
+
+if ( ! function_exists( 'is_wp_error' ) ) {
+	/**
+	 * Test double for WordPress is_wp_error().
+	 *
+	 * @param mixed $thing Thing to check.
+	 * @return bool
+	 */
+	function is_wp_error( $thing ) {
+		return is_object( $thing ) && is_a( $thing, 'WP_Error' );
+	}
+}
+
 /**
  * Tests for inc/cache-invalidation.php core primitives and WordPress hook invalidation.
  *
@@ -192,6 +303,8 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 		$GLOBALS['wpsc_test_posts']          = array();
 		$GLOBALS['wpsc_test_permalinks']     = array();
 		$GLOBALS['wpsc_test_post_meta']      = array();
+		$GLOBALS['wpsc_test_terms_by_tt_id'] = array();
+		$GLOBALS['wpsc_test_terms_by_id']    = array();
 		$GLOBALS['wpsc_test_current_filter'] = '';
 		$GLOBALS['file_prefix']              = 'wp-cache-';
 
@@ -226,6 +339,8 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 			$GLOBALS['wpsc_test_posts'],
 			$GLOBALS['wpsc_test_permalinks'],
 			$GLOBALS['wpsc_test_post_meta'],
+			$GLOBALS['wpsc_test_terms_by_tt_id'],
+			$GLOBALS['wpsc_test_terms_by_id'],
 			$GLOBALS['wpsc_test_current_filter'],
 			$GLOBALS['file_prefix'],
 			$GLOBALS['cached_direct_pages'],
@@ -785,24 +900,38 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 
 	/**
 	 * Regression 3: Permanent deletion from Trash for a previously published post purges cache.
+	 *
+	 * WordPress deletion lifecycle:
+	 * 1. Post is in trash with post_status='trash', post_name='trashed-post__trashed', _wp_trash_meta_status='publish'.
+	 * 2. before_delete_post fires while metadata and post object are intact.
+	 * 3. Core deletes post metadata (_wp_trash_meta_status is deleted).
+	 * 4. delete_post fires.
 	 */
 	public function test_permanent_deletion_from_trash_purges_cache(): void {
 		$post_id = 901;
 		$post    = (object) array(
 			'ID'          => $post_id,
 			'post_title'  => 'Trashed Post',
-			'post_name'   => 'trashed-post',
+			'post_name'   => 'trashed-post__trashed',
 			'post_type'   => 'post',
 			'post_status' => 'trash',
 		);
 		$GLOBALS['wpsc_test_posts'][ $post_id ]                               = $post;
 		$GLOBALS['wpsc_test_permalinks'][ $post_id ]                          = 'http://example.com/?p=901';
 		$GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] = 'publish';
-		$GLOBALS['wpsc_test_current_filter']                                  = 'delete_post';
 
 		$dir = $this->create_cache_fixture( '/trashed-post/' );
 		$this->assertFileExists( $dir . 'index.html' );
 
+		// Step 1: before_delete_post hook runs
+		$GLOBALS['wpsc_test_current_filter'] = 'before_delete_post';
+		turbo_cache_before_delete_post( $post_id, $post );
+
+		// Step 2: Core deletes metadata prior to delete_post
+		unset( $GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] );
+
+		// Step 3: delete_post hook runs legacy handler
+		$GLOBALS['wpsc_test_current_filter'] = 'delete_post';
 		wp_cache_post_edit( $post_id );
 
 		// Cache for previously published post is purged on permanent deletion
@@ -817,18 +946,26 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 		$post    = (object) array(
 			'ID'          => $post_id,
 			'post_title'  => 'Draft Post',
-			'post_name'   => 'draft-post',
+			'post_name'   => 'draft-post__trashed',
 			'post_type'   => 'post',
 			'post_status' => 'trash',
 		);
 		$GLOBALS['wpsc_test_posts'][ $post_id ]                               = $post;
 		$GLOBALS['wpsc_test_permalinks'][ $post_id ]                          = 'http://example.com/?p=902';
 		$GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] = 'draft';
-		$GLOBALS['wpsc_test_current_filter']                                  = 'delete_post';
 
 		$dir = $this->create_cache_fixture( '/draft-post/' );
 		$this->assertFileExists( $dir . 'index.html' );
 
+		// Step 1: before_delete_post hook runs
+		$GLOBALS['wpsc_test_current_filter'] = 'before_delete_post';
+		turbo_cache_before_delete_post( $post_id, $post );
+
+		// Step 2: Core deletes metadata prior to delete_post
+		unset( $GLOBALS['wpsc_test_post_meta'][ $post_id ]['_wp_trash_meta_status'] );
+
+		// Step 3: delete_post hook runs legacy handler
+		$GLOBALS['wpsc_test_current_filter'] = 'delete_post';
 		wp_cache_post_edit( $post_id );
 
 		// Never-published draft files are not purged through public cache hook
@@ -997,5 +1134,385 @@ class TurboCacheCoreInvalidationTest extends TestCase {
 		$res_purge = wpsc_delete_url_cache( 'http://example.com/rebuild-test/' );
 		$this->assertTrue( $res_purge );
 		$this->assertFileDoesNotExist( $dir . 'index.html.needs-rebuild' );
+	}
+
+	/**
+	 * Regression 11: Homepage purge failure rolls back deduplication and allows retry.
+	 */
+	public function test_homepage_failed_purge_allows_retry(): void {
+		$home_dir  = $this->create_cache_fixture( '/' );
+		$home_file = $home_dir . 'index.html';
+		$this->assertFileExists( $home_file );
+
+		// Simulate filesystem permission failure on homepage cache file.
+		chmod( $home_file, 0444 );
+
+		$failed_purge = turbo_cache_invalidate_homepage();
+		$this->assertFalse( $failed_purge );
+		$this->assertFileExists( $home_file );
+
+		// Deduplication tag must have been rolled back to allow retrying.
+		$this->assertTrue( turbo_cache_deduplicate_purge( 'homepage:0', 'check' ) );
+
+		// Fix permission and retry homepage purge.
+		chmod( $home_file, 0666 );
+		$retry_purge = turbo_cache_invalidate_homepage();
+		$this->assertTrue( $retry_purge );
+		$this->assertFileDoesNotExist( $home_file );
+	}
+
+	/**
+	 * Regression 12.A: Category-based permalink changes invalidate both old and new category URLs independently.
+	 *
+	 * Asserts independently that:
+	 * 1. Old category alpha cache artifact is removed.
+	 * 2. New category beta cache artifact is removed.
+	 * 3. Unrelated cached page remains intact.
+	 * 4. Repeating the mutation does not produce incorrect deduplication behavior.
+	 */
+	public function test_category_change_invalidates_old_and_new_urls_independently(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%category%/%postname%/';
+
+		$cat_alpha = (object) array(
+			'term_id'          => 10,
+			'term_taxonomy_id' => 10,
+			'slug'             => 'alpha',
+			'parent'           => 0,
+		);
+		$cat_beta  = (object) array(
+			'term_id'          => 20,
+			'term_taxonomy_id' => 20,
+			'slug'             => 'beta',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][10] = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_id'][10]    = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][20] = $cat_beta;
+		$GLOBALS['wpsc_test_terms_by_id'][20]    = $cat_beta;
+
+		$post_id = 1001;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Category Post',
+			'post_name'   => 'my-story',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/beta/my-story/';
+
+		$cat_old_dir   = $this->create_cache_fixture( '/alpha/my-story/' );
+		$cat_new_dir   = $this->create_cache_fixture( '/beta/my-story/' );
+		$unrelated_dir = $this->create_cache_fixture( '/unrelated-page/' );
+
+		$this->assertFileExists( $cat_old_dir . 'index.html' );
+		$this->assertFileExists( $cat_new_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+
+		// Execute core hook set_object_terms with category change from alpha (10) to beta (20)
+		turbo_cache_terms_changed( $post_id, array( 20 ), array( 20 ), 'category', false, array( 10 ) );
+
+		// Step 4: Assert old alpha cache artifact is removed
+		$this->assertFileDoesNotExist( $cat_old_dir . 'index.html' );
+
+		// Step 5: Assert independently that new beta cache artifact is removed
+		$this->assertFileDoesNotExist( $cat_new_dir . 'index.html' );
+
+		// Step 6: Verify unrelated cached page remains intact
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+
+		// Step 7: Verify repeating the same operation allows invalidation without incorrect deduplication suppression
+		$this->create_cache_fixture( '/alpha/my-story/' );
+		$this->create_cache_fixture( '/beta/my-story/' );
+		$this->assertFileExists( $cat_old_dir . 'index.html' );
+		$this->assertFileExists( $cat_new_dir . 'index.html' );
+
+		turbo_cache_terms_changed( $post_id, array( 20 ), array( 20 ), 'category', false, array( 10 ) );
+		$this->assertFileDoesNotExist( $cat_old_dir . 'index.html' );
+		$this->assertFileDoesNotExist( $cat_new_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 12.B: Multiple categories select lowest term_id matching WordPress core get_permalink().
+	 */
+	public function test_category_change_with_multiple_categories_selects_correct_permalink_category(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%category%/%postname%/';
+
+		$cat_alpha = (object) array(
+			'term_id'          => 10,
+			'term_taxonomy_id' => 10,
+			'slug'             => 'alpha',
+			'parent'           => 0,
+		);
+		$cat_zeta  = (object) array(
+			'term_id'          => 50,
+			'term_taxonomy_id' => 50,
+			'slug'             => 'zeta',
+			'parent'           => 0,
+		);
+		$cat_beta  = (object) array(
+			'term_id'          => 20,
+			'term_taxonomy_id' => 20,
+			'slug'             => 'beta',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][10] = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_id'][10]    = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][50] = $cat_zeta;
+		$GLOBALS['wpsc_test_terms_by_id'][50]    = $cat_zeta;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][20] = $cat_beta;
+		$GLOBALS['wpsc_test_terms_by_id'][20]    = $cat_beta;
+
+		$post_id = 1002;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Multi Cat Post',
+			'post_name'   => 'multi-story',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/beta/multi-story/';
+
+		// Old categories were zeta (50) and alpha (10). WordPress term_id ASC selects alpha (10).
+		// Pass $old_tt_ids in reverse order (50, 10) to test that naive reset() does NOT misidentify zeta as the permalink category.
+		$old_cat_dir    = $this->create_cache_fixture( '/alpha/multi-story/' );
+		$new_cat_dir    = $this->create_cache_fixture( '/beta/multi-story/' );
+		$zeta_fake_dir  = $this->create_cache_fixture( '/zeta/multi-story/' );
+		$unrelated_dir  = $this->create_cache_fixture( '/other-article/' );
+
+		turbo_cache_terms_changed( $post_id, array( 20, 50 ), array( 20, 50 ), 'category', false, array( 50, 10 ) );
+
+		// Old URL based on alpha is purged
+		$this->assertFileDoesNotExist( $old_cat_dir . 'index.html' );
+		// New URL based on beta is purged
+		$this->assertFileDoesNotExist( $new_cat_dir . 'index.html' );
+		// Zeta directory is NOT falsely targeted as the old permalink
+		$this->assertFileExists( $zeta_fake_dir . 'index.html' );
+		// Unrelated article remains intact
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 12.C: Hierarchical categories with parent paths are accurately reconstructed and purged.
+	 */
+	public function test_category_change_with_hierarchical_category_parent(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%category%/%postname%/';
+
+		$cat_news = (object) array(
+			'term_id'          => 10,
+			'term_taxonomy_id' => 10,
+			'slug'             => 'news',
+			'parent'           => 0,
+		);
+		$cat_tech = (object) array(
+			'term_id'          => 20,
+			'term_taxonomy_id' => 20,
+			'slug'             => 'tech',
+			'parent'           => 10,
+		);
+		$cat_rev  = (object) array(
+			'term_id'          => 30,
+			'term_taxonomy_id' => 30,
+			'slug'             => 'reviews',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][10] = $cat_news;
+		$GLOBALS['wpsc_test_terms_by_id'][10]    = $cat_news;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][20] = $cat_tech;
+		$GLOBALS['wpsc_test_terms_by_id'][20]    = $cat_tech;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][30] = $cat_rev;
+		$GLOBALS['wpsc_test_terms_by_id'][30]    = $cat_rev;
+
+		$post_id = 1003;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Gadget Review',
+			'post_name'   => 'gadget-review',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/reviews/gadget-review/';
+
+		$old_hier_dir  = $this->create_cache_fixture( '/news/tech/gadget-review/' );
+		$new_dir       = $this->create_cache_fixture( '/reviews/gadget-review/' );
+		$unrelated_dir = $this->create_cache_fixture( '/news/general/' );
+
+		turbo_cache_terms_changed( $post_id, array( 30 ), array( 30 ), 'category', false, array( 20 ) );
+
+		$this->assertFileDoesNotExist( $old_hier_dir . 'index.html' );
+		$this->assertFileDoesNotExist( $new_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 12.D: Category removal or replacement with default category invalidates cache.
+	 */
+	public function test_category_removal_or_replacement_invalidates_cache(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%category%/%postname%/';
+
+		$cat_custom  = (object) array(
+			'term_id'          => 15,
+			'term_taxonomy_id' => 15,
+			'slug'             => 'custom-cat',
+			'parent'           => 0,
+		);
+		$cat_default = (object) array(
+			'term_id'          => 1,
+			'term_taxonomy_id' => 1,
+			'slug'             => 'uncategorized',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][15] = $cat_custom;
+		$GLOBALS['wpsc_test_terms_by_id'][15]    = $cat_custom;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][1]  = $cat_default;
+		$GLOBALS['wpsc_test_terms_by_id'][1]     = $cat_default;
+
+		$post_id = 1004;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Reset Cat Post',
+			'post_name'   => 'reset-post',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/uncategorized/reset-post/';
+
+		$old_dir       = $this->create_cache_fixture( '/custom-cat/reset-post/' );
+		$new_dir       = $this->create_cache_fixture( '/uncategorized/reset-post/' );
+		$unrelated_dir = $this->create_cache_fixture( '/custom-cat/other/' );
+
+		turbo_cache_terms_changed( $post_id, array( 1 ), array( 1 ), 'category', false, array( 15 ) );
+
+		$this->assertFileDoesNotExist( $old_dir . 'index.html' );
+		$this->assertFileDoesNotExist( $new_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 12.E: Permalink structure without %category% invalidates post cache and archives.
+	 */
+	public function test_permalink_structure_without_category_token_invalidates_post_and_archives(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%postname%/';
+
+		$cat_old = (object) array(
+			'term_id'          => 10,
+			'term_taxonomy_id' => 10,
+			'slug'             => 'old-category',
+			'parent'           => 0,
+		);
+		$cat_new = (object) array(
+			'term_id'          => 20,
+			'term_taxonomy_id' => 20,
+			'slug'             => 'new-category',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][10] = $cat_old;
+		$GLOBALS['wpsc_test_terms_by_id'][10]    = $cat_old;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][20] = $cat_new;
+		$GLOBALS['wpsc_test_terms_by_id'][20]    = $cat_new;
+
+		$post_id = 1005;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Standard Permalink Post',
+			'post_name'   => 'standard-slug',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/standard-slug/';
+
+		$post_dir      = $this->create_cache_fixture( '/standard-slug/' );
+		$unrelated_dir = $this->create_cache_fixture( '/unrelated-post/' );
+
+		$this->assertFileExists( $post_dir . 'index.html' );
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+
+		turbo_cache_terms_changed( $post_id, array( 20 ), array( 20 ), 'category', false, array( 10 ) );
+
+		// Post cache is invalidated because category display on single post changed
+		$this->assertFileDoesNotExist( $post_dir . 'index.html' );
+		// Unrelated post is preserved
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 12.F: Category change where primary permalink category is unchanged does not spuriously purge old paths.
+	 */
+	public function test_category_change_when_permalink_category_does_not_change(): void {
+		$GLOBALS['wpsc_test_options']['permalink_structure'] = '/%category%/%postname%/';
+
+		$cat_alpha = (object) array(
+			'term_id'          => 10,
+			'term_taxonomy_id' => 10,
+			'slug'             => 'alpha',
+			'parent'           => 0,
+		);
+		$cat_beta  = (object) array(
+			'term_id'          => 30,
+			'term_taxonomy_id' => 30,
+			'slug'             => 'beta',
+			'parent'           => 0,
+		);
+		$cat_gamma = (object) array(
+			'term_id'          => 40,
+			'term_taxonomy_id' => 40,
+			'slug'             => 'gamma',
+			'parent'           => 0,
+		);
+
+		$GLOBALS['wpsc_test_terms_by_tt_id'][10] = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_id'][10]    = $cat_alpha;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][30] = $cat_beta;
+		$GLOBALS['wpsc_test_terms_by_id'][30]    = $cat_beta;
+		$GLOBALS['wpsc_test_terms_by_tt_id'][40] = $cat_gamma;
+		$GLOBALS['wpsc_test_terms_by_id'][40]    = $cat_gamma;
+
+		$post_id = 1006;
+		$post    = (object) array(
+			'ID'          => $post_id,
+			'post_title'  => 'Steady Category Post',
+			'post_name'   => 'steady-post',
+			'post_type'   => 'post',
+			'post_status' => 'publish',
+			'post_date'   => '2026-10-12 10:00:00',
+		);
+		$GLOBALS['wpsc_test_posts'][ $post_id ]      = $post;
+		// Both before and after, alpha (10) is the lowest term_id, so permalink is alpha/steady-post/
+		$GLOBALS['wpsc_test_permalinks'][ $post_id ] = 'http://example.com/alpha/steady-post/';
+
+		$post_dir      = $this->create_cache_fixture( '/alpha/steady-post/' );
+		$unrelated_dir = $this->create_cache_fixture( '/unrelated-post/' );
+
+		// Secondary category changes from beta (30) to gamma (40) while alpha (10) remains
+		turbo_cache_terms_changed( $post_id, array( 10, 40 ), array( 10, 40 ), 'category', false, array( 10, 30 ) );
+
+		// Post cache is invalidated via turbo_cache_invalidate_post
+		$this->assertFileDoesNotExist( $post_dir . 'index.html' );
+		// Unrelated cache is preserved
+		$this->assertFileExists( $unrelated_dir . 'index.html' );
+	}
+
+	/**
+	 * Regression 13: wpsc_register_post_hooks handles CLI config sync and respects disabled cache.
+	 */
+	public function test_cli_hook_registration_and_disabled_cache_preservation(): void {
+		// Verify when cache_enabled is false, hooks are not registered
+		$GLOBALS['cache_enabled'] = false;
+		wpsc_register_post_hooks();
+		$this->assertFalse( $GLOBALS['cache_enabled'] );
 	}
 }

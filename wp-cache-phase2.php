@@ -1893,6 +1893,20 @@ function wpsc_register_post_hooks() {
 		return;
 	}
 
+	// In CLI/cron contexts, wp-cache-base.php may have run before get_option()
+	// was available, temporarily forcing $cache_enabled = false. Synchronize
+	// WPSC_HTTP_HOST and re-verify configuration if get_option() is now ready.
+	if ( PHP_SAPI === 'cli' && function_exists( 'get_option' ) ) {
+		global $WPSC_HTTP_HOST, $wp_cache_config_file;
+		if ( empty( $WPSC_HTTP_HOST ) ) {
+			$WPSC_HTTP_HOST = (string) parse_url( get_option( 'home' ), PHP_URL_HOST );
+			$WPSC_HTTP_HOST = function_exists( 'mb_strtolower' ) ? mb_strtolower( $WPSC_HTTP_HOST ) : strtolower( $WPSC_HTTP_HOST );
+		}
+		if ( false === $GLOBALS['cache_enabled'] && ! empty( $wp_cache_config_file ) && file_exists( $wp_cache_config_file ) ) {
+			include $wp_cache_config_file;
+		}
+	}
+
 	if ( false === $GLOBALS['cache_enabled']
 		|| ( defined( 'WPLOCKDOWN' ) && constant( 'WPLOCKDOWN' ) != '0' )
 	) {
@@ -1901,6 +1915,7 @@ function wpsc_register_post_hooks() {
 	}
 
 	// Post ID is received
+	add_action( 'before_delete_post', 'turbo_cache_before_delete_post', 0, 2 );
 	add_action( 'wp_trash_post', 'wp_cache_post_edit', 0 );
 	add_action( 'publish_post', 'wp_cache_post_edit', 0 );
 	add_action( 'edit_post', 'wp_cache_post_change', 0 ); // leaving a comment called edit_post
@@ -1921,6 +1936,7 @@ function wpsc_register_post_hooks() {
 	add_action( 'clean_post_cache', 'wp_cache_post_edit' );
 	add_action( 'transition_post_status', 'wpsc_post_transition', 10, 3 );
 	add_action( 'post_updated', 'turbo_cache_post_updated', 10, 3 );
+	add_action( 'set_object_terms', 'turbo_cache_terms_changed', 10, 6 );
 
 	// Cron hooks
 	add_action( 'wp_cache_gc', 'wp_cache_gc_cron' );
@@ -3440,10 +3456,12 @@ function wpsc_delete_post_archives( $post ) {
 	}
 
 	// Author archive page
-	$author_url = get_author_posts_url( $post->post_author );
-	if ( $author_url ) {
-		wpsc_delete_url_cache( $author_url );
-		wp_cache_debug( 'wpsc_delete_post_archives: deleting cache of author archive: ' . $author_url );
+	if ( ! empty( $post->post_author ) && function_exists( 'get_author_posts_url' ) ) {
+		$author_url = get_author_posts_url( $post->post_author );
+		if ( $author_url ) {
+			wpsc_delete_url_cache( $author_url );
+			wp_cache_debug( 'wpsc_delete_post_archives: deleting cache of author archive: ' . $author_url );
+		}
 	}
 }
 
@@ -3547,18 +3565,9 @@ function wp_cache_post_edit( $post_id ) {
 		return $post_id;
 	}
 
-	// Support permanent deletion of previously public posts from trash.
-	$is_delete_trash = false;
-	if ( 'delete_post' === current_filter() && 'trash' === get_post_status( $post ) ) {
-		$orig_status = function_exists( 'get_post_meta' ) ? get_post_meta( $post_id, '_wp_trash_meta_status', true ) : '';
-		if ( in_array( $orig_status, array( 'publish', 'private' ), true ) || empty( $orig_status ) ) {
-			$is_delete_trash = true;
-		}
-	}
-
 	// Some users are inexplicibly seeing this error on scheduled posts.
 	// define this constant to disable the post status check.
-	if ( ! defined( 'WPSCFORCEUPDATE' ) && ! $is_delete_trash && ! in_array( get_post_status( $post ), array( 'publish', 'private' ), true ) ) {
+	if ( ! defined( 'WPSCFORCEUPDATE' ) && ! in_array( get_post_status( $post ), array( 'publish', 'private' ), true ) ) {
 		wp_cache_debug( 'wp_cache_post_edit: draft post, not deleting any cache files. status: ' . $post->post_status, 4 );
 		return $post_id;
 	}
