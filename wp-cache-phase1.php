@@ -6,6 +6,7 @@ if ( ! function_exists( 'wp_cache_phase2' ) ) {
 require_once __DIR__ . '/inc/request-safety.php';
 require_once __DIR__ . '/inc/cache-storage.php';
 require_once __DIR__ . '/inc/cache-delivery.php';
+require_once __DIR__ . '/inc/cache-maintenance.php';
 
 // error_reporting(E_ERROR | E_PARSE); // uncomment to debug this file!
 // directory where the configuration file lives.

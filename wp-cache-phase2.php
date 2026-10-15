@@ -12,6 +12,7 @@ require_once __DIR__ . '/inc/request-safety.php';
 require_once __DIR__ . '/inc/cache-storage.php';
 require_once __DIR__ . '/inc/cache-invalidation.php';
 require_once __DIR__ . '/inc/cache-delivery.php';
+require_once __DIR__ . '/inc/cache-maintenance.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
@@ -1487,19 +1488,17 @@ function wpsc_deep_replace( $search, $subject ) {
 
 function wpsc_get_protected_directories() {
 	global $cache_path, $blog_cache_dir;
-	return apply_filters(
-		'wpsc_protected_directories',
-		array(
-			$cache_path . '.htaccess',
-			$cache_path . 'index.html',
-			$blog_cache_dir,
-			$blog_cache_dir . 'index.html',
-			$blog_cache_dir . 'meta',
-			$blog_cache_dir . 'meta/index.html',
-			$cache_path . 'supercache/index.html',
-			$cache_path . 'supercache',
-		)
+	$dirs = array(
+		$cache_path . '.htaccess',
+		$cache_path . 'index.html',
+		$blog_cache_dir,
+		$blog_cache_dir . 'index.html',
+		$blog_cache_dir . 'meta',
+		$blog_cache_dir . 'meta/index.html',
+		$cache_path . 'supercache/index.html',
+		$cache_path . 'supercache',
 	);
+	return function_exists( 'apply_filters' ) ? apply_filters( 'wpsc_protected_directories', $dirs ) : $dirs;
 }
 
 function wpsc_debug_username() {
@@ -3030,6 +3029,21 @@ function prune_super_cache( $directory, $force = false, $rename = false ) {
 
 	if ( $protected_directories == '' ) {
 		$protected_directories = wpsc_get_protected_directories();
+	}
+
+	// Bounded, resource-metered pruning via Turbo Cache storage maintenance layer.
+	if ( ! $rename && function_exists( 'turbo_cache_prune_storage' ) && is_dir( $directory ) ) {
+		$metrics = turbo_cache_prune_storage(
+			$directory,
+			array(
+				'force'     => (bool) $force,
+				'max_age'   => (int) $cache_max_time,
+				'max_files' => (bool) $force ? 0 : 500,
+			)
+		);
+		$deleted = $metrics['deleted_files'] + $metrics['deleted_tmp'] + $metrics['deleted_dirs'];
+		wp_cache_debug( "prune_super_cache (Turbo Cache): deleted {$deleted} items (files: {$metrics['deleted_files']}, dirs: {$metrics['deleted_dirs']}, tmp: {$metrics['deleted_tmp']}) in {$metrics['duration']}s", 5 );
+		return $deleted;
 	}
 
 	if ( is_dir( $directory ) ) {
