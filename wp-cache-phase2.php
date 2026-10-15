@@ -134,6 +134,16 @@ function wp_cache_serve_cache_file() {
 	global $cache_compression, $wp_cache_slash_check, $wp_supercache_304, $wp_cache_home_path, $wp_cache_no_cache_for_get;
 	global $wp_cache_disable_utf8, $wp_cache_mfunc_enabled, $wpsc_served_header;
 
+	if ( defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE ) {
+		wp_cache_debug( 'wp_cache_serve_cache_file: DONOTCACHEPAGE defined. Not serving cached file.' );
+		return false;
+	}
+
+	if ( function_exists( 'turbo_cache_check_request_safety' ) && ( $safety_bypass = turbo_cache_check_request_safety() ) ) {
+		wp_cache_debug( 'wp_cache_serve_cache_file: request safety bypass (' . $safety_bypass . '). Not serving cached file.' );
+		return false;
+	}
+
 	if ( wpsc_is_backend() ) {
 		wp_cache_debug( 'Not serving wp-admin requests.', 5 );
 		return false;
@@ -194,7 +204,7 @@ function wp_cache_serve_cache_file() {
 		global $wpsc_save_headers;
 		global $cache_max_time;
 		// last chance, check if a supercache file exists. Just in case .htaccess rules don't work on this host
-		$file = get_current_url_supercache_dir() . supercache_filename();
+		$file = function_exists( 'turbo_cache_get_cache_filepath' ) ? turbo_cache_get_cache_filepath() : ( get_current_url_supercache_dir() . supercache_filename() );
 		if ( false == file_exists( $file ) ) {
 			wp_cache_debug( "No Super Cache file found for current URL: $file" );
 			return false;
@@ -608,9 +618,13 @@ function wpsc_parse_accept_header( $raw_accept, $json_types ) {
 	return $json_q > $effective_html_q ? 'application/json' : 'text/html';
 }
 
-function wp_cache_get_cookies_values() {
+function wp_cache_get_cookies_values( $reset = false ) {
 	global $wpsc_cookies;
 	static $string = '';
+
+	if ( $reset ) {
+		$string = '';
+	}
 
 	if ( $string != '' ) {
 		wp_cache_debug( "wp_cache_get_cookies_values: cached: $string" );
@@ -618,6 +632,12 @@ function wp_cache_get_cookies_values() {
 	}
 
 	$string = wpsc_get_auth_cookie_values( $_COOKIE );
+
+	if ( function_exists( 'turbo_cache_detect_woocommerce_cookie' ) && ( $wc_cookie = turbo_cache_detect_woocommerce_cookie() ) ) {
+		$wc_val = isset( $_COOKIE[ $wc_cookie ] ) && is_scalar( $_COOKIE[ $wc_cookie ] ) ? $_COOKIE[ $wc_cookie ] : '1';
+		$string .= $wc_cookie . '=' . $wc_val . ',';
+		wp_cache_debug( "wp_cache_get_cookies_values - found WooCommerce cookie: $wc_cookie" );
+	}
 
 	// If you use this hook, make sure you update your .htaccess rules with the same conditions
 	$string = do_cacheaction( 'wp_cache_get_cookies_values', $string );
@@ -2391,6 +2411,9 @@ function wp_cache_ob_callback( $buffer ) {
 	} elseif ( $matched_wc_cookie = turbo_cache_detect_woocommerce_cookie() ) {
 		wp_cache_debug( 'WooCommerce dynamic cookie found: ' . $matched_wc_cookie . '. Caching disabled.', 2 );
 		$cache_this_page = false;
+	} elseif ( function_exists( 'turbo_cache_rule_query_params' ) && ( $qp_reason = turbo_cache_rule_query_params() ) ) {
+		wp_cache_debug( 'Query parameter bypass: ' . $qp_reason . '. Caching disabled.', 2 );
+		$cache_this_page = false;
 	} elseif ( $wp_cache_no_cache_for_get && wpsc_is_get_query() ) {
 		wp_cache_debug( 'Non empty GET request. Caching disabled on settings page. ' . wpsc_dump_get_request(), 1 );
 		$cache_this_page = false;
@@ -2714,7 +2737,7 @@ function wp_cache_get_ob( &$buffer ) {
 			)
 		) {
 			$cache_fname        = $dir . supercache_filename();
-			$tmp_cache_filename = $dir . uniqid( (string) wp_rand(), true ) . '.tmp';
+			$tmp_cache_filename = function_exists( 'turbo_cache_get_temp_filename' ) ? turbo_cache_get_temp_filename( $dir ) : ( $dir . uniqid( (string) wp_rand(), true ) . '.tmp' );
 			$fr2                = @fopen( $tmp_cache_filename, 'w' );
 			if ( ! $fr2 ) {
 				wp_cache_debug( 'Error. Supercache could not write to ' . str_replace( ABSPATH, '', $tmp_cache_filename ), 1 );
