@@ -11,6 +11,7 @@
 require_once __DIR__ . '/inc/request-safety.php';
 require_once __DIR__ . '/inc/cache-storage.php';
 require_once __DIR__ . '/inc/cache-invalidation.php';
+require_once __DIR__ . '/inc/cache-delivery.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
@@ -236,6 +237,16 @@ function wp_cache_serve_cache_file() {
 		// make sure ending slashes are ok
 		if ( $wp_cache_request_uri == $wp_cache_home_path || ( $wp_cache_slash_check && substr( $wp_cache_request_uri, -1 ) == '/' ) || ( $wp_cache_slash_check == 0 && substr( $wp_cache_request_uri, -1 ) != '/' ) ) {
 
+			// Early RFC 7232 conditional GET evaluation: return 304 without file read overhead if cache unexpired.
+			if ( $wp_cache_mfunc_enabled == 0 && function_exists( 'turbo_cache_validate_conditional_request' ) ) {
+				$cond = turbo_cache_validate_conditional_request( $file );
+				if ( ! empty( $cond['is_304'] ) ) {
+					wp_cache_debug( 'wp_cache_serve_cache_file: sending 304 Not Modified (matched by ' . $cond['matched_by'] . ')' );
+					turbo_cache_send_conditional_304( $cond['etag'], $cond['mtime'] );
+					exit( 0 );
+				}
+			}
+
 			if ( $wp_cache_mfunc_enabled == 0 ) {
 				// get data from file
 				if ( $wp_cache_gzip_encoding ) {
@@ -305,7 +316,10 @@ function wp_cache_serve_cache_file() {
 			} else {
 				header( 'Cache-Control: max-age=3, must-revalidate' );
 			}
-			$size = ( function_exists( 'mb_strlen' ) && function_exists( 'is_utf8_charset' ) ) ? mb_strlen( $cachefiledata, '8bit' ) : strlen( $cachefiledata );
+			$size       = ( function_exists( 'mb_strlen' ) && function_exists( 'is_utf8_charset' ) ) ? mb_strlen( $cachefiledata, '8bit' ) : strlen( $cachefiledata );
+			$file_mtime = @filemtime( $file );
+			$etag       = function_exists( 'turbo_cache_generate_etag' ) ? turbo_cache_generate_etag( $file_mtime, $size ) : '';
+
 			if ( $wp_cache_gzip_encoding ) {
 				if ( isset( $wpsc_served_header ) && $wpsc_served_header ) {
 					header( 'X-WP-Super-Cache: Served supercache gzip file from PHP' );
@@ -319,7 +333,18 @@ function wp_cache_serve_cache_file() {
 				header( 'Content-Length: ' . $size );
 			} elseif ( isset( $wpsc_served_header ) && $wpsc_served_header ) {
 				header( 'X-WP-Super-Cache: Served supercache file from PHP' );
+				header( 'Content-Length: ' . $size );
+			} else {
+				header( 'Content-Length: ' . $size );
 			}
+
+			if ( $etag ) {
+				header( 'ETag: ' . $etag );
+			}
+			if ( $file_mtime > 0 ) {
+				header( 'Last-Modified: ' . gmdate( 'D, d M Y H:i:s', $file_mtime ) . ' GMT' );
+			}
+			header( 'X-Turbo-Cache: HIT (supercache)' );
 
 			// don't try to match modified dates if using dynamic code.
 			if ( $wp_cache_mfunc_enabled == 0 && $wp_supercache_304 ) {
