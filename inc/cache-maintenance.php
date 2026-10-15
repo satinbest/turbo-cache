@@ -28,11 +28,11 @@ if ( ! defined( 'ABSPATH' ) && ! defined( 'WP_CONTENT_DIR' ) && ! defined( 'WPCA
  *
  * Standalone equivalent of trailingslashit() to avoid runtime dependency.
  *
- * @param string $string Input path or URI.
+ * @param string $path_or_uri Input path or URI.
  * @return string Normalized path with trailing slash.
  */
-function turbo_cache_trailingslash( $string ) {
-	return rtrim( str_replace( '\\', '/', (string) $string ), '/' ) . '/';
+function turbo_cache_trailingslash( $path_or_uri ) {
+	return rtrim( str_replace( '\\', '/', (string) $path_or_uri ), '/' ) . '/';
 }
 
 /**
@@ -56,7 +56,7 @@ function turbo_cache_is_safe_maintenance_target( $path, $cache_root = null ) {
 	}
 
 	$norm_path = str_replace( '\\', '/', $path );
-	if ( str_contains( $norm_path, '..' ) ) {
+	if ( false !== strpos( $norm_path, '..' ) ) {
 		return false;
 	}
 
@@ -67,7 +67,7 @@ function turbo_cache_is_safe_maintenance_target( $path, $cache_root = null ) {
 	$norm_root = turbo_cache_trailingslash( $cache_root );
 
 	$in_cache = false;
-	if ( '' !== $norm_root && str_starts_with( $norm_path, $norm_root ) ) {
+	if ( '' !== $norm_root && 0 === strpos( $norm_path, $norm_root ) ) {
 		$in_cache = true;
 	} elseif ( function_exists( 'wpsc_is_in_cache_directory' ) && wpsc_is_in_cache_directory( $path ) ) {
 		$in_cache = true;
@@ -77,10 +77,10 @@ function turbo_cache_is_safe_maintenance_target( $path, $cache_root = null ) {
 	if ( ! $in_cache ) {
 		if ( is_array( $cached_direct_pages ) && defined( 'ABSPATH' ) && '' !== ABSPATH ) {
 			$norm_abs = turbo_cache_trailingslash( ABSPATH );
-			if ( str_starts_with( $norm_path, $norm_abs ) ) {
+			if ( 0 === strpos( $norm_path, $norm_abs ) ) {
 				foreach ( $cached_direct_pages as $page ) {
 					$norm_page = trim( (string) $page, '/' );
-					if ( '' !== $norm_page && str_starts_with( $norm_path, $norm_abs . $norm_page ) ) {
+					if ( '' !== $norm_page && 0 === strpos( $norm_path, $norm_abs . $norm_page ) ) {
 						$in_cache = true;
 						break;
 					}
@@ -93,18 +93,49 @@ function turbo_cache_is_safe_maintenance_target( $path, $cache_root = null ) {
 		return false;
 	}
 
+	// If the file or directory exists and is a symlink, verify the resolved realpath does not escape.
+	if ( @file_exists( $path ) ) {
+		$real = @realpath( $path );
+		if ( false !== $real ) {
+			$norm_real     = str_replace( '\\', '/', $real );
+			$real_in_cache = false;
+			if ( '' !== $norm_root && 0 === strpos( $norm_real, rtrim( $norm_root, '/' ) ) ) {
+				$real_in_cache = true;
+			} elseif ( is_array( $cached_direct_pages ) && defined( 'ABSPATH' ) && '' !== ABSPATH ) {
+				$norm_abs = turbo_cache_trailingslash( ABSPATH );
+				if ( 0 === strpos( $norm_real, rtrim( $norm_abs, '/' ) ) ) {
+					foreach ( $cached_direct_pages as $page ) {
+						$norm_page = trim( (string) $page, '/' );
+						if ( '' !== $norm_page && 0 === strpos( $norm_real, $norm_abs . $norm_page ) ) {
+							$real_in_cache = true;
+							break;
+						}
+					}
+				}
+			}
+			if ( ! $real_in_cache ) {
+				return false;
+			}
+		}
+	}
+
 	// Protect root security guard files.
 	$basename = basename( $norm_path );
 	if ( in_array( $basename, array( '.htaccess', 'index.html' ), true ) ) {
-		// Only protect if at root or supercache root level.
+		// Only protect if at root or structural levels.
 		$parent = turbo_cache_trailingslash( dirname( $norm_path ) );
-		if ( $parent === $norm_root || $parent === $norm_root . 'supercache/' ) {
+		if (
+			$parent === $norm_root ||
+			$parent === $norm_root . 'supercache/' ||
+			$parent === $norm_root . 'blogs/' ||
+			$parent === $norm_root . 'meta/'
+		) {
 			return false;
 		}
 	}
 
 	// Protect structural root directories from deletion.
-	$trimmed_path = rtrim( $norm_path, '/' );
+	$trimmed_path    = rtrim( $norm_path, '/' );
 	$protected_roots = array(
 		rtrim( $norm_root, '/' ),
 		rtrim( $norm_root, '/' ) . '/supercache',
@@ -112,8 +143,25 @@ function turbo_cache_is_safe_maintenance_target( $path, $cache_root = null ) {
 		rtrim( $norm_root, '/' ) . '/meta',
 	);
 
+	if ( defined( 'ABSPATH' ) && '' !== ABSPATH ) {
+		$protected_roots[] = rtrim( str_replace( '\\', '/', ABSPATH ), '/' );
+	}
+
 	if ( in_array( $trimmed_path, $protected_roots, true ) ) {
 		return false;
+	}
+
+	// Respect upstream wpsc_get_protected_directories() if available.
+	if ( function_exists( 'wpsc_get_protected_directories' ) ) {
+		$upstream_protected = wpsc_get_protected_directories();
+		if ( is_array( $upstream_protected ) ) {
+			foreach ( $upstream_protected as $prot_item ) {
+				$norm_prot = rtrim( str_replace( '\\', '/', (string) $prot_item ), '/' );
+				if ( $trimmed_path === $norm_prot ) {
+					return false;
+				}
+			}
+		}
 	}
 
 	return true;
@@ -185,13 +233,16 @@ function turbo_cache_prune_storage( $directory, array $options = array() ) {
 
 	$start_time = microtime( true );
 
-	$default_max_age = isset( $cache_max_time ) && (int) $cache_max_time > 0 ? (int) $cache_max_time : 3600;
+	$default_max_age    = isset( $cache_max_time ) && (int) $cache_max_time > 0 ? (int) $cache_max_time : 3600;
+	$is_forced          = isset( $options['force'] ) && (bool) $options['force'];
+	$default_max_files  = $is_forced ? 0 : 500;
+	$default_time_limit = $is_forced ? 0.0 : 15.0;
 
 	$config = array_merge(
 		array(
 			'max_age'          => $default_max_age,
-			'max_files'        => 500,
-			'time_limit'       => 15.0,
+			'max_files'        => $default_max_files,
+			'time_limit'       => $default_time_limit,
 			'tmp_max_age'      => 300,
 			'clean_empty_dirs' => true,
 			'clean_stale_tmp'  => true,
@@ -269,6 +320,11 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 
 		$path = $dir . $entry;
 
+		if ( is_link( $path ) ) {
+			// Symlinks must never be traversed or treated as directories to prevent loops and escaping.
+			continue;
+		}
+
 		if ( is_dir( $path ) ) {
 			$subdirs[] = $path;
 		} elseif ( is_file( $path ) ) {
@@ -280,11 +336,11 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 			}
 
 			$mtime   = @filemtime( $path );
-			$is_temp = str_ends_with( $entry, '.tmp' ) || str_ends_with( $entry, '.tmp.gz' );
+			$is_temp = ( substr( $entry, -4 ) === '.tmp' || substr( $entry, -7 ) === '.tmp.gz' );
 
 			// 1. Abandoned temporary files.
-			if ( $is_temp && $config['clean_stale_tmp'] ) {
-				if ( $config['force'] || ( $mtime && ( $config['now'] - $mtime ) >= $config['tmp_max_age'] ) ) {
+			if ( $is_temp ) {
+				if ( $config['clean_stale_tmp'] && ( $config['force'] || ( $mtime && ( $config['now'] - $mtime ) >= $config['tmp_max_age'] ) ) ) {
 					if ( @unlink( $path ) ) {
 						++$metrics['deleted_tmp'];
 						if ( $config['max_files'] > 0 && ( $metrics['deleted_files'] + $metrics['deleted_tmp'] ) >= $config['max_files'] ) {
@@ -292,22 +348,23 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 							break;
 						}
 					}
-					continue;
 				}
+				continue;
 			}
 
 			// 2. Regular cache files and companion files.
 			$is_expired = $config['force'] || ( $mtime && ( $config['now'] - $mtime ) >= $config['max_age'] );
 
 			if ( $is_expired ) {
-				// Only unlink recognized cache artifacts.
+				// Only unlink recognized cache artifacts unless forced.
 				if (
-					str_starts_with( $entry, 'index' ) ||
-					str_ends_with( $entry, '.html' ) ||
-					str_ends_with( $entry, '.gz' ) ||
-					str_ends_with( $entry, '.meta' ) ||
-					str_ends_with( $entry, '.needs-rebuild' ) ||
-					str_ends_with( $entry, '.tmp' )
+					$config['force'] ||
+					0 === strpos( $entry, 'index' ) ||
+					substr( $entry, -5 ) === '.html' ||
+					substr( $entry, -3 ) === '.gz' ||
+					substr( $entry, -5 ) === '.meta' ||
+					substr( $entry, -14 ) === '.needs-rebuild' ||
+					substr( $entry, -4 ) === '.tmp'
 				) {
 					if ( @unlink( $path ) ) {
 						++$metrics['deleted_files'];
@@ -318,12 +375,12 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 					}
 				}
 			}
+		}
 
-			// Time check inside file loop.
-			if ( $config['time_limit'] > 0 && ( microtime( true ) - $start_time ) >= $config['time_limit'] ) {
-				$metrics['timed_out'] = true;
-				break;
-			}
+		// Time check inside directory entry loop.
+		if ( $config['time_limit'] > 0 && ( microtime( true ) - $start_time ) >= $config['time_limit'] ) {
+			$metrics['timed_out'] = true;
+			break;
 		}
 	}
 
@@ -332,6 +389,10 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 	// Recurse into subdirectories unless limits were reached.
 	if ( ! $metrics['timed_out'] && ! $metrics['hit_limit'] ) {
 		foreach ( $subdirs as $subdir ) {
+			if ( $config['time_limit'] > 0 && ( microtime( true ) - $start_time ) >= $config['time_limit'] ) {
+				$metrics['timed_out'] = true;
+				break;
+			}
 			turbo_cache_prune_storage_recursive( $subdir, $config, $metrics, $start_time );
 			if ( $metrics['timed_out'] || $metrics['hit_limit'] ) {
 				break;
@@ -341,6 +402,10 @@ function turbo_cache_prune_storage_recursive( $dir, array $config, array &$metri
 
 	// 3. Clean empty directory if all child files expired and were removed.
 	if ( $config['clean_empty_dirs'] && ! $metrics['timed_out'] ) {
+		if ( $config['time_limit'] > 0 && ( microtime( true ) - $start_time ) >= $config['time_limit'] ) {
+			$metrics['timed_out'] = true;
+			return;
+		}
 		if ( turbo_cache_is_safe_maintenance_target( $dir ) && turbo_cache_is_dir_empty( $dir ) ) {
 			if ( @rmdir( $dir ) ) {
 				++$metrics['deleted_dirs'];

@@ -1202,8 +1202,7 @@ function wpsc_rebuild_files( $dir ) {
 
 // realpath() doesn't always remove the trailing slash
 function wpsc_get_realpath( $directory ) {
-	if ( $directory == '/' ) {
-		wp_cache_debug( "wpsc_get_realpath: cannot get realpath of '/'" );
+	if ( null === $directory || '' === $directory || $directory == '/' ) {
 		return false;
 	}
 
@@ -3036,9 +3035,10 @@ function prune_super_cache( $directory, $force = false, $rename = false ) {
 		$metrics = turbo_cache_prune_storage(
 			$directory,
 			array(
-				'force'     => (bool) $force,
-				'max_age'   => (int) $cache_max_time,
-				'max_files' => (bool) $force ? 0 : 500,
+				'force'      => (bool) $force,
+				'max_age'    => (int) $cache_max_time,
+				'max_files'  => (bool) $force ? 0 : 500,
+				'time_limit' => (bool) $force ? 0.0 : 15.0,
 			)
 		);
 		$deleted = $metrics['deleted_files'] + $metrics['deleted_tmp'] + $metrics['deleted_dirs'];
@@ -3139,13 +3139,13 @@ function wp_cache_rebuild_or_delete( $file ) {
 		return false;
 	}
 
-	if ( substr( basename( $file ), 0, mb_strlen( $file_prefix ) ) == $file_prefix ) {
+	if ( ! empty( $file_prefix ) && substr( basename( $file ), 0, mb_strlen( $file_prefix ) ) == $file_prefix ) {
 		@unlink( $file );
 		wp_cache_debug( "rebuild_or_gc: deleted non-anonymous file: $file" );
 		return false;
 	}
 
-	if ( substr( basename( $file ), 0, 5 + mb_strlen( $file_prefix ) ) == 'meta-' . $file_prefix ) {
+	if ( ! empty( $file_prefix ) && substr( basename( $file ), 0, 5 + mb_strlen( $file_prefix ) ) == 'meta-' . $file_prefix ) {
 		@unlink( $file );
 		wp_cache_debug( "rebuild_or_gc: deleted meta file: $file" );
 		return false;

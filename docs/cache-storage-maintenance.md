@@ -62,13 +62,32 @@ The storage maintenance layer is implemented in [`inc/cache-maintenance.php`](fi
 * `prune_super_cache( $directory, $force = false, $rename = false )` in `wp-cache-phase2.php` delegates non-rename operations to `turbo_cache_prune_storage()`.
 * Upstream callers (`wp_cache_gc_cron`, `wp_cache_phase2_clean_expired`, `wp_cache_clean_expired`) automatically benefit from bounded, crash-safe execution with zero changes to their function signatures or return types.
 
+### 2.7 Upstream Parameter Semantics & Safety (Phase 7.1 Verification)
+* **`force = false` (Routine Maintenance)**:
+  - Bounded by `max_files` (default 500) and `time_limit` (default 15.0s).
+  - Only deletes expired cache files (`filemtime + max_age <= now`).
+  - Strict preservation of fresh cache files (`filemtime + max_age > now`).
+  - Active `.tmp` files (`now - filemtime < tmp_max_age`) are preserved even when `max_age` is small.
+  - Deletion is restricted to recognized cache artifacts (`index*`, `.html`, `.gz`, `.meta`, `.needs-rebuild`, `.tmp`).
+* **`force = true` (Full Cache Purge)**:
+  - Sets `max_files = 0` (unlimited) and `time_limit = 0.0` (unlimited) by default.
+  - Deletes all recognized cache artifacts regardless of modification time (fresh or expired).
+  - Matches original upstream purge behavior upon post update, cache clear, or plugin deactivation.
+* **`rename = true` (Legacy Rebuild Workflow)**:
+  - Bypasses Turbo Cache delegation and executes the original `wp_cache_rebuild_or_delete()` path.
+  - Correctly renames `index.html` to `index.html.needs-rebuild` when `$cache_rebuild_files = 1`.
+* **Symlink and Filesystem Safety**:
+  - Symlinks inside the cache tree are checked via `realpath()`. Any symlink whose resolved path escapes the authorized cache root or direct pages is rejected.
+  - Symlinks to directories are never traversed to prevent circular directory traversal.
+  - Structural root directories (`cache_path`, `supercache`, `blogs`, `meta`, and `ABSPATH`) and guard files (`.htaccess`, `index.html` at structural levels) are immune to pruning.
+
 ---
 
 ## 3. Verification & Results
 
 ### 3.1 Smoke Tests
 * Test Suite: [`tests/php/smoke/TurboCacheStorageMaintenanceTest.php`](file:///d:/turbo-cache/tests/php/smoke/TurboCacheStorageMaintenanceTest.php)
-* 14 focused tests verifying:
+* 24 focused tests verifying:
   - Boundary checking within cache directory.
   - Rejection of directory traversal and out-of-bounds targets.
   - Protection of root guard files (`.htaccess`, `index.html`).
@@ -82,15 +101,27 @@ The storage maintenance layer is implemented in [`inc/cache-maintenance.php`](fi
   - Enforcement of `max_files` bounding.
   - Force pruning mode.
   - End-to-end integration with `prune_super_cache()`.
-* **Full PHPUnit Suite Result:** **208 tests, 470 assertions, 0 errors, 0 failures**.
+  - `force=true` full purge removing fresh files and emptying directories.
+  - `force=false` preserving fresh files and only removing expired files.
+  - `rename=true` legacy rebuild behavior (`.needs-rebuild`).
+  - Processing >500 eligible files across multiple successive bounded runs (e.g., 600 files in 400-file batches).
+  - Time-budget termination (`time_limit`) and subsequent seamless recovery without skipping files.
+  - Active `.tmp` preservation under aggressive cache `max_age`.
+  - Root guard files and structural roots preserved under forced purge.
+  - Multisite and direct-page path safety validation.
+  - Symlink safety and out-of-bounds target rejection.
+  - Large nested directory tree time-budget compliance throughout recursive traversal.
+* **PHP Compatibility:** Strict PHP 7.4+ compatibility (uses `substr` and `strpos` rather than PHP 8.0 string functions).
+* **Full PHPUnit Suite Result:** **218 tests, 520 assertions, 0 errors, 0 failures**.
+* **WordPress Coding Standards (PHPCS):** **0 errors, 0 warnings** (`WordPress` standard).
 
 ### 3.2 Laragon Testbed Live Verification
-* Verified on `D:\laragon\www\turbo-baseline\wp-content\cache\supercache\localhost\turbo-baseline\`:
-  - Created test directory containing expired `index.html` (2 hours old), stale `stale.tmp` (10 minutes old), and fresh `index.html` (0 seconds old).
-  - Executed `prune_super_cache()` through live engine.
+* Verified on `D:\laragon\www\turbo-baseline\wp-content\cache\`:
+  - Verified plugin active status and function presence via Laragon WP-CLI.
+  - Created test directory containing live expired `index.html`.
+  - Executed `prune_super_cache()` through the live WordPress engine.
   - **Results Observed:**
-    - Expired file was unlinked.
-    - Stale temporary file was unlinked.
-    - Empty directory was cleanly removed.
-    - Fresh cache file was 100% preserved.
-    - Populated fresh directory was 100% preserved.
+    - Live expired file unlinked.
+    - Empty directory removed.
+    - Verified return metric: `2` (1 file + 1 directory).
+    - Verified live site returns HTTP 200 OK.
