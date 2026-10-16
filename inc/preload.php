@@ -5,11 +5,10 @@
  * cancel, post-type and post-count helpers, the preload settings UI, and the
  * status AJAX endpoint.
  *
- * Relocated from wp-cache.php (issue #1061) as a pure move: identical function
- * signatures and hook registrations, no behaviour change.
- *
  * @package WP_Super_Cache
  */
+
+require_once __DIR__ . '/preload-engine.php';
 
 /**
  * Serves an AJAX endpoint to return the current state of the preload process.
@@ -155,6 +154,38 @@ function wp_cron_preload_cache() {
 	}
 	$fp = @fopen( $mutex, 'w' );
 	@fclose( $fp );
+
+	if ( apply_filters( 'turbo_cache_use_safe_preload', true ) && function_exists( 'turbo_cache_preload_process_batch' ) ) {
+		$batch_res = turbo_cache_preload_process_batch();
+		@unlink( $mutex );
+
+		if ( 'running' === $batch_res['status'] ) {
+			if ( ! wp_next_scheduled( 'wp_cache_preload_hook' ) ) {
+				wp_schedule_single_event( time() + 3, 'wp_cache_preload_hook' );
+			}
+			return true;
+		} elseif ( 'completed' === $batch_res['status'] ) {
+			wpsc_reset_preload_counter();
+			if ( (int) $wp_cache_preload_interval && defined( 'DOING_CRON' ) ) {
+				if ( ! wp_next_scheduled( 'wp_cache_full_preload_hook' ) ) {
+					wp_schedule_single_event( time() + ( (int) $wp_cache_preload_interval * 60 ), 'wp_cache_full_preload_hook' );
+				}
+			}
+			global $file_prefix, $cache_max_time;
+			if ( $wp_cache_preload_interval > 0 ) {
+				$cache_max_time = (int) $wp_cache_preload_interval * 60;
+			} else {
+				$cache_max_time = 86400;
+			}
+			if ( $cache_max_time > 0 && function_exists( 'wp_cache_phase2_clean_expired' ) ) {
+				wp_cache_phase2_clean_expired( $file_prefix, true );
+			}
+			wpsc_update_idle_preload( time() );
+			return true;
+		} else {
+			return true;
+		}
+	}
 
 	$counter = get_option( 'preload_cache_counter' );
 	$c = $counter[ 'c' ];
@@ -473,6 +504,13 @@ function wpsc_is_preload_active() {
 		return true;
 	}
 
+	if ( function_exists( 'turbo_cache_preload_get_state' ) ) {
+		$turbo_state = turbo_cache_preload_get_state();
+		if ( isset( $turbo_state['status'] ) && 'running' === $turbo_state['status'] ) {
+			return true;
+		}
+	}
+
 	// check taxonomy preload loop
 	$taxonomies = apply_filters(
 		'wp_cache_preload_taxonomies',
@@ -537,6 +575,10 @@ function wpsc_reset_preload_settings() {
 	foreach ( $taxonomies as $taxonomy => $path ) {
 		$taxonomy_filename = $cache_path . 'taxonomy_' . $taxonomy . '.txt';
 		wp_delete_file( $taxonomy_filename );
+	}
+
+	if ( function_exists( 'turbo_cache_preload_reset_state' ) ) {
+		turbo_cache_preload_reset_state();
 	}
 }
 

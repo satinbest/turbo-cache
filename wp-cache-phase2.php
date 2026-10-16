@@ -13,6 +13,7 @@ require_once __DIR__ . '/inc/cache-storage.php';
 require_once __DIR__ . '/inc/cache-invalidation.php';
 require_once __DIR__ . '/inc/cache-delivery.php';
 require_once __DIR__ . '/inc/cache-maintenance.php';
+require_once __DIR__ . '/inc/preload-engine.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it

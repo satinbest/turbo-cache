@@ -102,6 +102,147 @@ if ( ! function_exists( 'wp_rand' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_parse_url' ) ) {
+	/**
+	 * Parse a URL (test double for WordPress wp_parse_url()).
+	 *
+	 * @param string $url       The URL to parse.
+	 * @param int    $component The specific component to retrieve.
+	 * @return mixed
+	 */
+	function wp_parse_url( $url, $component = -1 ) {
+		return parse_url( (string) $url, $component );
+	}
+}
+
+if ( ! function_exists( 'wp_remote_get' ) ) {
+	/**
+	 * Dispatch HTTP GET (test double for WordPress wp_remote_get()).
+	 *
+	 * @param string $url  Request URL.
+	 * @param array  $args Request arguments.
+	 * @return array
+	 */
+	function wp_remote_get( $url, $args = array() ) {
+		$mock = apply_filters( 'pre_http_request', false, $args, $url );
+		if ( false !== $mock ) {
+			return $mock;
+		}
+		return array(
+			'response' => array( 'code' => 200 ),
+			'headers'  => array(),
+			'body'     => '',
+		);
+	}
+}
+
+if ( ! function_exists( 'wp_remote_retrieve_response_code' ) ) {
+	/**
+	 * Retrieve response code (test double for WordPress wp_remote_retrieve_response_code()).
+	 *
+	 * @param array $response HTTP response array.
+	 * @return int
+	 */
+	function wp_remote_retrieve_response_code( $response ) {
+		if ( is_array( $response ) && isset( $response['response']['code'] ) ) {
+			return (int) $response['response']['code'];
+		}
+		return 0;
+	}
+}
+
+if ( ! function_exists( 'wp_remote_retrieve_header' ) ) {
+	/**
+	 * Retrieve response header (test double for WordPress wp_remote_retrieve_header()).
+	 *
+	 * @param array  $response HTTP response array.
+	 * @param string $header   Header name.
+	 * @return string
+	 */
+	function wp_remote_retrieve_header( $response, $header ) {
+		$header_lower = strtolower( $header );
+		if ( is_array( $response ) && isset( $response['headers'] ) && is_array( $response['headers'] ) ) {
+			foreach ( $response['headers'] as $k => $v ) {
+				if ( strtolower( $k ) === $header_lower ) {
+					return is_array( $v ) ? implode( ', ', $v ) : (string) $v;
+				}
+			}
+		}
+		return '';
+	}
+}
+
+if ( ! function_exists( 'is_wp_error' ) ) {
+	/**
+	 * Check whether variable is a WP_Error (test double for WordPress is_wp_error()).
+	 *
+	 * @param mixed $thing The variable to check.
+	 * @return bool
+	 */
+	function is_wp_error( $thing ) {
+		unset( $thing );
+		return false;
+	}
+}
+
+if ( ! function_exists( 'get_option' ) ) {
+	/**
+	 * Test double for WordPress get_option().
+	 *
+	 * @param string $option  Option name.
+	 * @param mixed  $default Default value.
+	 * @return mixed
+	 */
+	function get_option( $option, $default = false ) {
+		if ( isset( $GLOBALS['wpsc_test_options'][ $option ] ) ) {
+			return $GLOBALS['wpsc_test_options'][ $option ];
+		}
+		if ( 'home' === $option || 'siteurl' === $option ) {
+			return 'https://example.com';
+		}
+		return $default;
+	}
+}
+
+if ( ! function_exists( 'update_option' ) ) {
+	/**
+	 * Test double for WordPress update_option().
+	 *
+	 * @param string $option Option name.
+	 * @param mixed  $value  Option value.
+	 * @return bool
+	 */
+	function update_option( $option, $value ) {
+		$GLOBALS['wpsc_test_options'][ $option ] = $value;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'delete_option' ) ) {
+	/**
+	 * Test double for WordPress delete_option().
+	 *
+	 * @param string $option Option name.
+	 * @return bool
+	 */
+	function delete_option( $option ) {
+		unset( $GLOBALS['wpsc_test_options'][ $option ] );
+		return true;
+	}
+}
+
+if ( ! function_exists( 'trailingslashit' ) ) {
+	/**
+	 * Appends a trailing slash (test double for WordPress trailingslashit()).
+	 *
+	 * @param string $string Value to trailingslash.
+	 * @return string
+	 */
+	function trailingslashit( $string ) {
+		return rtrim( (string) $string, '/\\' ) . '/';
+	}
+}
+
 /*
  * Load the procedural caching engine. Its functions become callable from tests.
  * require_once keeps test files that also require it (for self-documentation)
