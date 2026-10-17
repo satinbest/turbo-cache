@@ -1,6 +1,8 @@
-# WP Super Cache
+# Turbo Cache
 
-A very fast caching engine for WordPress that produces static HTML files.
+Turbo Cache is a lightweight, open-source WordPress caching plugin focused on performance, security, and reliability. Built for safe page caching, intelligent cache management, and WooCommerce compatibility, with a strong emphasis on avoiding stale content, protecting dynamic pages, and delivering dependable performance.
+
+Based on WP Super Cache.
 
 [![WordPress Plugin](https://img.shields.io/wordpress/plugin/v/wp-super-cache)](https://wordpress.org/plugins/wp-super-cache/)
 [![License: GPLv2+](https://img.shields.io/badge/License-GPLv2%2B-blue.svg)](./LICENSE.txt)
