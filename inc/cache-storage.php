@@ -214,7 +214,7 @@ function turbo_cache_get_storage_dir( $uri = null, $host = null, $cache_path = n
 		$cache_path = isset( $GLOBALS['cache_path'] ) ? $GLOBALS['cache_path'] : '';
 	}
 
-	if ( '' !== $cache_path && ! str_ends_with( $cache_path, '/' ) && ! str_ends_with( $cache_path, '\\' ) ) {
+	if ( '' !== $cache_path && '/' !== substr( $cache_path, -1 ) && '\\' !== substr( $cache_path, -1 ) ) {
 		$cache_path .= '/';
 	}
 

@@ -927,7 +927,7 @@ function wp_cache_check_mobile( $cache_key ) {
 		}
 	}
 	$accept = isset( $_SERVER['HTTP_ACCEPT'] ) ? strtolower( $_SERVER['HTTP_ACCEPT'] ) : '';
-	if ( str_contains( $accept, 'wap' ) ) {
+	if ( false !== strpos( $accept, 'wap' ) ) {
 		return $cache_key . '-' . 'wap';
 	}
 
@@ -1230,8 +1230,8 @@ function get_current_url_supercache_dir( $post_id = 0 ) {
 			}
 		} else {
 			$uri       = str_replace( $site_url, '', $permalink );
-			$home_path = $wp_cache_home_path ?? '';
-			if ( $home_path !== '' && ! str_starts_with( $uri, $home_path ) ) {
+			$home_path = isset( $wp_cache_home_path ) ? $wp_cache_home_path : '';
+			if ( $home_path !== '' && 0 !== strncmp( $uri, $home_path, strlen( $home_path ) ) ) {
 				$uri = rtrim( $home_path, '/' ) . $uri;
 			}
 		}
@@ -1345,7 +1345,7 @@ function wpsc_is_in_cache_directory( $directory ) {
 		$norm_rp  = strtolower( $norm_rp );
 	}
 
-	if ( str_starts_with( $norm_dir, $norm_rp ) ) {
+	if ( 0 === strncmp( $norm_dir, $norm_rp, strlen( $norm_rp ) ) ) {
 		return true;
 	} else {
 		return false;
@@ -4115,7 +4115,7 @@ function wpsc_apache_request_headers() {
 	if ( ! function_exists( 'apache_request_headers' ) || ! is_callable( 'apache_request_headers' ) ) {
 		$headers = array();
 		foreach ( array_keys( $_SERVER ) as $skey ) {
-			if ( str_starts_with( $skey, 'HTTP_' ) ) {
+			if ( 0 === strncmp( $skey, 'HTTP_', 5 ) ) {
 				$header             = implode( '-', array_map( 'ucfirst', array_slice( explode( '_', strtolower( $skey ) ), 1 ) ) );
 				$headers[ $header ] = $_SERVER[ $skey ];
 			}

@@ -40,12 +40,12 @@ if ( is_multisite() ) {
 
 		$wpsc_path_segs  = array_filter( explode( '/', trim( $request_uri, '/' ) ) );
 		$wpsc_base_count = defined( 'PATH_CURRENT_SITE' ) ? count( array_filter( explode( '/', trim( PATH_CURRENT_SITE, '/' ) ) ) ) : 0;
-		if ( ! str_ends_with( $request_uri, '/' ) ) {
+		if ( '/' !== substr( $request_uri, -1 ) ) {
 			$wpsc_path_segs = array_slice( $wpsc_path_segs, 0, -1 );
 		}
 
 		if ( count( $wpsc_path_segs ) > $wpsc_base_count &&
-			( ! defined( 'PATH_CURRENT_SITE' ) || str_starts_with( $request_uri, PATH_CURRENT_SITE ) )
+			( ! defined( 'PATH_CURRENT_SITE' ) || 0 === strncmp( $request_uri, PATH_CURRENT_SITE, strlen( PATH_CURRENT_SITE ) ) )
 		) {
 			$blogcacheid = $wpsc_path_segs[ $wpsc_base_count ];
 		}

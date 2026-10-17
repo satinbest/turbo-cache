@@ -200,7 +200,7 @@ function turbo_cache_is_safe_purge_dir( $dir ) {
 			$norm_dir     = trailingslashit( str_replace( '\\', '/', false !== $rp_d ? $rp_d : $dir ) );
 			$rp_abs       = realpath( ABSPATH );
 			$norm_abspath = trailingslashit( str_replace( '\\', '/', false !== $rp_abs ? $rp_abs : ABSPATH ) );
-			if ( $norm_dir !== $norm_abspath && str_starts_with( $norm_dir, $norm_abspath ) ) {
+			if ( $norm_dir !== $norm_abspath && 0 === strncmp( $norm_dir, $norm_abspath, strlen( $norm_abspath ) ) ) {
 				foreach ( $cached_direct_pages as $page ) {
 					$norm_page = trim( (string) $page, '/' );
 					if ( '' !== $norm_page && $norm_dir === $norm_abspath . $norm_page . '/' ) {
@@ -279,7 +279,8 @@ function turbo_cache_purge_storage_dir( $dir, $delete_dir = true, &$success = nu
 	$deleted = 0;
 
 	// Direct page directories under ABSPATH must never have their directory unlinked.
-	if ( $delete_dir && defined( 'ABSPATH' ) && '' !== ABSPATH && str_starts_with( $dir, trailingslashit( str_replace( '\\', '/', ABSPATH ) ) ) && ! str_contains( $dir, '/cache/' ) ) {
+	$norm_abspath_dir = trailingslashit( str_replace( '\\', '/', ABSPATH ) );
+	if ( $delete_dir && defined( 'ABSPATH' ) && '' !== ABSPATH && 0 === strncmp( $dir, $norm_abspath_dir, strlen( $norm_abspath_dir ) ) && false === strpos( $dir, '/cache/' ) ) {
 		$delete_dir = false;
 	}
 
@@ -300,11 +301,11 @@ function turbo_cache_purge_storage_dir( $dir, $delete_dir = true, &$success = nu
 		if ( is_file( $filepath ) ) {
 			// Delete cache files, compressed variants, and rebuild staging files.
 			if (
-				str_starts_with( $file, 'index' ) ||
-				str_ends_with( $file, '.html' ) ||
-				str_ends_with( $file, '.gz' ) ||
-				str_ends_with( $file, '.needs-rebuild' ) ||
-				str_ends_with( $file, '.tmp' )
+				0 === strncmp( $file, 'index', 5 ) ||
+				'.html' === substr( $file, -5 ) ||
+				'.gz' === substr( $file, -3 ) ||
+				'.needs-rebuild' === substr( $file, -14 ) ||
+				'.tmp' === substr( $file, -4 )
 			) {
 				if ( @unlink( $filepath ) ) {
 					++$deleted;
@@ -345,7 +346,7 @@ function turbo_cache_purge_url( $url ) {
 	}
 
 	// URLs with query parameters are not stored in static supercache.
-	if ( str_contains( $url, '?' ) ) {
+	if ( false !== strpos( $url, '?' ) ) {
 		return false;
 	}
 
@@ -506,7 +507,7 @@ function turbo_cache_get_post_canonical_url( $post ) {
 
 	// When post is unpublishing or drafted, get_permalink() may return ?p=123.
 	// Fall back to sample permalink to locate its public cache directory on disk.
-	if ( ! empty( $post->post_name ) && ( false === $url || str_contains( (string) $url, '?p=' ) || str_contains( (string) $url, '?page_id=' ) ) ) {
+	if ( ! empty( $post->post_name ) && ( false === $url || false !== strpos( (string) $url, '?p=' ) || false !== strpos( (string) $url, '?page_id=' ) ) ) {
 		if ( function_exists( 'get_sample_permalink' ) ) {
 			list( $permalink_structure ) = get_sample_permalink( $post );
 			if ( ! empty( $permalink_structure ) ) {
@@ -678,7 +679,7 @@ function turbo_cache_resolve_post_object_url( $post ) {
 			$sample_post->post_name   = $clean_slug;
 		}
 		list( $structure ) = get_sample_permalink( $sample_post, null, $clean_slug );
-		if ( ! empty( $structure ) && ! str_contains( $structure, '?p=' ) && ! str_contains( $structure, '?page_id=' ) ) {
+		if ( ! empty( $structure ) && false === strpos( $structure, '?p=' ) && false === strpos( $structure, '?page_id=' ) ) {
 			return str_replace( array( '%postname%', '%pagename%' ), $clean_slug, $structure );
 		}
 	}
@@ -686,7 +687,7 @@ function turbo_cache_resolve_post_object_url( $post ) {
 	// 3. Fallback: get_permalink with post object.
 	if ( function_exists( 'get_permalink' ) ) {
 		$url = get_permalink( $post );
-		if ( $url && ! str_contains( (string) $url, '?p=' ) && ! str_contains( (string) $url, '?page_id=' ) ) {
+		if ( $url && false === strpos( (string) $url, '?p=' ) && false === strpos( (string) $url, '?page_id=' ) ) {
 			return $url;
 		}
 	}
@@ -858,7 +859,7 @@ function turbo_cache_terms_changed( $object_id, $terms, $tt_ids, $taxonomy, $app
 
 	// When permalink structure does not contain %category%, the URL is unchanged,
 	// but the post content (category display) and category archives must be invalidated.
-	if ( ! str_contains( $structure, '%category%' ) ) {
+	if ( false === strpos( $structure, '%category%' ) ) {
 		$new_url = turbo_cache_get_post_canonical_url( $post );
 		if ( $new_url ) {
 			$new_key = turbo_cache_normalize_invalidation_target( $new_url );
@@ -911,7 +912,7 @@ function turbo_cache_terms_changed( $object_id, $terms, $tt_ids, $taxonomy, $app
 			$path = str_replace( '%category%', $cat_path, $structure );
 			$path = str_replace( array( '%postname%', '%pagename%' ), $post->post_name, $path );
 
-			if ( ! empty( $post->post_date ) && ( str_contains( $path, '%year%' ) || str_contains( $path, '%monthnum%' ) || str_contains( $path, '%day%' ) ) ) {
+			if ( ! empty( $post->post_date ) && ( false !== strpos( $path, '%year%' ) || false !== strpos( $path, '%monthnum%' ) || false !== strpos( $path, '%day%' ) ) ) {
 				$date = explode( ' ', str_replace( array( '-', ':' ), ' ', (string) $post->post_date ) );
 				$path = str_replace(
 					array( '%year%', '%monthnum%', '%day%', '%hour%', '%minute%', '%second%' ),
@@ -927,11 +928,11 @@ function turbo_cache_terms_changed( $object_id, $terms, $tt_ids, $taxonomy, $app
 				);
 			}
 
-			if ( str_contains( $path, '%post_id%' ) ) {
+			if ( false !== strpos( $path, '%post_id%' ) ) {
 				$path = str_replace( '%post_id%', (string) $post->ID, $path );
 			}
 
-			if ( str_contains( $path, '%author%' ) && ! empty( $post->post_author ) && function_exists( 'get_userdata' ) ) {
+			if ( false !== strpos( $path, '%author%' ) && ! empty( $post->post_author ) && function_exists( 'get_userdata' ) ) {
 				$authordata = get_userdata( $post->post_author );
 				if ( is_object( $authordata ) && ! empty( $authordata->user_nicename ) ) {
 					$path = str_replace( '%author%', $authordata->user_nicename, $path );
