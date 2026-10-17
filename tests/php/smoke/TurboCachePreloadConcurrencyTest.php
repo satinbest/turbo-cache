@@ -805,4 +805,182 @@ class TurboCachePreloadConcurrencyTest extends TestCase {
 		$this->assertSame( $winning_token, turbo_cache_preload_get_lock_token() );
 		turbo_cache_preload_release_lock( $winning_token );
 	}
+
+	/**
+	 * 19. Coordination file open failure fails closed without executing callback (Step 2).
+	 */
+	public function test_coordination_open_failure_fails_closed_without_callback() {
+		// Point coordination file to an uncreatable / invalid directory path.
+		$invalid_file = $this->temp_dir . 'nonexistent_directory_for_test/coord.lock';
+
+		add_filter(
+			'turbo_cache_preload_coordination_file',
+			function () use ( $invalid_file ) {
+				return $invalid_file;
+			}
+		);
+
+		$executed = false;
+		$res      = turbo_cache_preload_with_coordination(
+			function () use ( &$executed ) {
+				$executed = true;
+				return true;
+			}
+		);
+
+		$this->assertFalse( $res, 'with_coordination must return false when file open fails' );
+		$this->assertFalse( $executed, 'Protected callback must NOT execute when coordination file cannot be opened' );
+
+		// Callers must fail closed and never report false success.
+		$tok = 'unmodified';
+		$this->assertFalse( turbo_cache_preload_acquire_lock( $tok ) );
+		$this->assertNull( $tok );
+
+		$this->assertFalse( turbo_cache_preload_save_state( array( 'status' => 'test' ) ) );
+		$this->assertFalse( turbo_cache_preload_release_lock( 'test_token' ) );
+		$this->assertFalse( turbo_cache_preload_reset_state() );
+
+		remove_all_filters( 'turbo_cache_preload_coordination_file' );
+	}
+
+	/**
+	 * 20. Coordination flock acquisition failure fails closed without executing callback (Step 2).
+	 */
+	public function test_coordination_flock_failure_fails_closed_without_callback() {
+		$coord_file = $this->temp_dir . 'preload_coord.lock';
+		$fp         = fopen( $coord_file, 'c+' );
+		$this->assertIsResource( $fp );
+
+		// Acquire exclusive lock on the coordination file directly.
+		$locked = flock( $fp, LOCK_EX );
+		$this->assertTrue( $locked );
+
+		// Test with non-blocking flag so flock immediately fails instead of blocking.
+		add_filter(
+			'turbo_cache_preload_coordination_flags',
+			function () {
+				return LOCK_EX | LOCK_NB;
+			}
+		);
+
+		$executed = false;
+		$res      = turbo_cache_preload_with_coordination(
+			function () use ( &$executed ) {
+				$executed = true;
+				return true;
+			}
+		);
+
+		$this->assertFalse( $res, 'with_coordination must return false when flock fails' );
+		$this->assertFalse( $executed, 'Protected callback must NOT execute when flock acquisition fails' );
+
+		// Release external lock and clean up.
+		flock( $fp, LOCK_UN );
+		fclose( $fp );
+		remove_all_filters( 'turbo_cache_preload_coordination_flags' );
+	}
+
+	/**
+	 * 21. Reset during an in-flight request prevents subsequent URLs from being dispatched (Step 4).
+	 */
+	public function test_reset_during_inflight_request_prevents_subsequent_urls() {
+		turbo_cache_preload_reset_state();
+
+		$state                              = turbo_cache_preload_get_state();
+		$state['status']                    = 'running';
+		$state['queue']                     = array(
+			'https://example.com/item-first',
+			'https://example.com/item-second',
+		);
+		$state['queue_cursor']              = 0;
+		$state['stats']['total_discovered'] = 2;
+		turbo_cache_preload_save_state( $state );
+
+		$urls_requested = array();
+		add_filter(
+			'pre_http_request',
+			function ( $response, $parsed_args, $url ) use ( &$urls_requested ) {
+				unset( $response, $parsed_args );
+				$urls_requested[] = $url;
+				// Reset occurs while the first URL is in-flight!
+				turbo_cache_preload_reset_state();
+
+				return array(
+					'response' => array(
+						'code'    => 200,
+						'message' => 'OK',
+					),
+					'body'     => '<html><body>First</body></html>',
+				);
+			},
+			10,
+			3
+		);
+
+		$batch_res = turbo_cache_preload_process_batch( 2 );
+		remove_all_filters( 'pre_http_request' );
+
+		$this->assertSame( 'superseded', $batch_res['status'] );
+		$this->assertCount( 1, $urls_requested, 'Only the first in-flight URL must have been requested' );
+		$this->assertNotContains( 'https://example.com/item-second', $urls_requested );
+
+		// State on disk remains the reset state.
+		$disk_state = turbo_cache_preload_get_state();
+		$this->assertSame( 'idle', $disk_state['status'] );
+		$this->assertEmpty( $disk_state['queue'] );
+	}
+
+	/**
+	 * 22. Old worker resumption after its lock is superseded cannot mutate state (Step 3 & 4).
+	 */
+	public function test_old_worker_resumption_after_stale_lock_superseded() {
+		turbo_cache_preload_reset_state();
+
+		// Worker 1 acquires lock.
+		$w1_token = null;
+		$this->assertTrue( turbo_cache_preload_acquire_lock( $w1_token ) );
+
+		$state                 = turbo_cache_preload_get_state();
+		$state['status']       = 'running';
+		$state['queue']        = array( 'https://example.com/w1-url' );
+		$state['queue_cursor'] = 0;
+		$gen1                  = $state['generation'];
+		$this->assertTrue( turbo_cache_preload_save_state( $state, $gen1, $w1_token ) );
+
+		// Worker 1 is suspended/frozen for > 600s.
+		$lock_file = $this->temp_dir . 'preload_batch.lock';
+		touch( $lock_file, time() - 700 );
+
+		// Worker 2 recovers stale lock and advances generation.
+		$w2_token = null;
+		$this->assertTrue( turbo_cache_preload_acquire_lock( $w2_token ) );
+		$this->assertNotSame( $w1_token, $w2_token );
+
+		$state2                 = turbo_cache_preload_get_state();
+		$state2['status']       = 'running';
+		$state2['queue']        = array( 'https://example.com/w2-url' );
+		$state2['generation']   = 'gen_worker_2_' . uniqid();
+		$gen2                   = $state2['generation'];
+		$this->assertTrue( turbo_cache_preload_save_state( $state2, $gen1, $w2_token ) );
+
+		// Worker 1 unfreezes and attempts to commit stale in-memory state:
+		$stale_w1_state                 = $state;
+		$stale_w1_state['queue_cursor'] = 1;
+		$stale_w1_state['status']       = 'completed';
+
+		// 1) Save state must fail.
+		$this->assertFalse( turbo_cache_preload_save_state( $stale_w1_state, $gen1, $w1_token ) );
+
+		// 2) Worker 1 attempting to release lock with its old token must fail and NOT delete Worker 2's lock.
+		$this->assertFalse( turbo_cache_preload_release_lock( $w1_token ) );
+		$this->assertSame( $w2_token, turbo_cache_preload_get_lock_token() );
+
+		// 3) Worker 2's authoritative state is intact.
+		$disk_state = turbo_cache_preload_get_state();
+		$this->assertSame( $gen2, $disk_state['generation'] );
+		$this->assertSame( array( 'https://example.com/w2-url' ), $disk_state['queue'] );
+
+		// Cleanup Worker 2.
+		$this->assertTrue( turbo_cache_preload_release_lock( $w2_token ) );
+	}
 }

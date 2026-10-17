@@ -531,6 +531,9 @@ function turbo_cache_preload_with_coordination( $callback ) {
 	}
 
 	$mutex_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_coord.lock';
+	if ( function_exists( 'apply_filters' ) ) {
+		$mutex_file = apply_filters( 'turbo_cache_preload_coordination_file', $mutex_file );
+	}
 
 	$dir = dirname( $mutex_file );
 	if ( ! is_dir( $dir ) && function_exists( 'wp_mkdir_p' ) ) {
@@ -539,14 +542,20 @@ function turbo_cache_preload_with_coordination( $callback ) {
 
 	$fp = @fopen( $mutex_file, 'c+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 	if ( false === $fp ) {
-		// Fallback if filesystem permissions prevent opening the coordination file.
-		return call_user_func( $callback );
+		// Fail-closed: do NOT execute protected callback if coordination file cannot be opened.
+		return false;
 	}
 
-	$locked = @flock( $fp, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	$lock_flags = LOCK_EX;
+	if ( function_exists( 'apply_filters' ) ) {
+		$lock_flags = (int) apply_filters( 'turbo_cache_preload_coordination_flags', $lock_flags );
+	}
+
+	$locked = @flock( $fp, $lock_flags ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 	if ( ! $locked ) {
 		@fclose( $fp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		return call_user_func( $callback );
+		// Fail-closed: do NOT execute protected callback if coordination lock cannot be acquired.
+		return false;
 	}
 
 	$coord_fp   = $fp;
@@ -795,10 +804,10 @@ function turbo_cache_preload_release_lock( $token = null ) {
  * active worker lock so no new worker can start while the old worker is finishing,
  * while removing any stale (> 600s) lock.
  *
- * @return void
+ * @return bool True on success, false on failure or coordination failure.
  */
 function turbo_cache_preload_reset_state() {
-	turbo_cache_preload_with_coordination(
+	return (bool) turbo_cache_preload_with_coordination(
 		function () {
 			global $cache_path;
 			$new_generation = 'gen_' . microtime( true ) . '_' . mt_rand( 1000, 9999 );
@@ -826,7 +835,7 @@ function turbo_cache_preload_reset_state() {
 			);
 
 			// Commit clean idle state with new generation under coordination mutex.
-			turbo_cache_preload_save_state( $reset_state, null, null, true );
+			$saved = turbo_cache_preload_save_state( $reset_state, null, null, true );
 
 			// Check lock file: if stale (> 600s), remove it.
 			// If lock is held by a valid active worker, DO NOT unlink it.
@@ -842,6 +851,8 @@ function turbo_cache_preload_reset_state() {
 			if ( function_exists( 'delete_option' ) ) {
 				delete_option( 'turbo_cache_preload_state' );
 			}
+
+			return (bool) $saved;
 		}
 	);
 }

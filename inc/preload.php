@@ -97,7 +97,10 @@ function wpsc_ajax_preload_reset_state() {
 		wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wp-super-cache' ) ), 403 );
 	}
 
-	turbo_cache_preload_reset_state();
+	$reset_ok = turbo_cache_preload_reset_state();
+	if ( ! $reset_ok ) {
+		wp_send_json_error( array( 'message' => __( 'Could not acquire preload coordination lock to reset state.', 'wp-super-cache' ) ), 500 );
+	}
 
 	// Remove stop_preload.txt flag if present so subsequent runs are not immediately aborted.
 	if ( isset( $cache_path ) && '' !== $cache_path && file_exists( $cache_path . 'stop_preload.txt' ) ) {

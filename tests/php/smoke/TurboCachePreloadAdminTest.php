@@ -499,4 +499,32 @@ class TurboCachePreloadAdminTest extends TestCase {
 		$this->assertStringContainsString( 'name="cache_filler"', $output );
 		$this->assertStringContainsString( 'name="do_preload"', $output );
 	}
+
+	/**
+	 * Test AJAX reset state fails closed with 500 error when coordination fails.
+	 */
+	public function test_ajax_reset_state_coordination_failure() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		$GLOBALS['wpsc_test_fail_nonce']       = false;
+
+		add_filter(
+			'turbo_cache_preload_coordination_file',
+			function () {
+				return sys_get_temp_dir() . '/invalid_dir_never_created/coord.lock';
+			}
+		);
+
+		try {
+			wpsc_ajax_preload_reset_state();
+			$this->fail( 'Expected wp_send_json_error was not called on coordination failure' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'wp_send_json_error', $e->getMessage() );
+			$response = $GLOBALS['wpsc_test_last_json_response'];
+			$this->assertFalse( $response['success'] );
+			$this->assertSame( 500, $response['code'] );
+			$this->assertStringContainsString( 'coordination lock', $response['data']['message'] );
+		} finally {
+			remove_all_filters( 'turbo_cache_preload_coordination_file' );
+		}
+	}
 }
