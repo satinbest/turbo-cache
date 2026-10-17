@@ -46,16 +46,16 @@ $turbo_last_error = ! empty( $turbo_state['last_error'] ) ? sanitize_text_field(
 
 		<button type="button" id="turbo-preload-batch-btn" class="button button-primary">
 			<span class="dashicons dashicons-controls-play" style="vertical-align: middle; font-size: 16px; width: 16px; height: 16px; margin-right: 4px;"></span>
-			<?php esc_html_e( 'Process Next Batch', 'wp-super-cache' ); ?>
+			<span class="turbo-btn-text"><?php esc_html_e( 'Process Next Batch', 'wp-super-cache' ); ?></span>
 		</button>
 
 		<button type="button" id="turbo-preload-refresh-btn" class="button button-secondary">
 			<span class="dashicons dashicons-update" style="vertical-align: middle; font-size: 16px; width: 16px; height: 16px; margin-right: 4px;"></span>
-			<?php esc_html_e( 'Refresh Status', 'wp-super-cache' ); ?>
+			<span class="turbo-btn-text"><?php esc_html_e( 'Refresh Status', 'wp-super-cache' ); ?></span>
 		</button>
 
 		<button type="button" id="turbo-preload-reset-btn" class="button button-link-delete" style="margin-left: auto;">
-			<?php esc_html_e( 'Reset Preload State', 'wp-super-cache' ); ?>
+			<span class="turbo-btn-text"><?php esc_html_e( 'Reset Preload State', 'wp-super-cache' ); ?></span>
 		</button>
 	</div>
 

@@ -168,6 +168,26 @@ class TurboCacheDiagnosticsAdminTest extends TestCase {
 
 		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache' );
 		$this->assertArrayNotHasKey( 'wpsc-diagnostics-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+
+		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache-network' );
+		$this->assertArrayNotHasKey( 'wpsc-diagnostics-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+	}
+
+	/**
+	 * Test diagnostics script is enqueued on Network Admin settings screen (BACKLOG-M3).
+	 */
+	public function test_admin_enqueue_scripts_on_network_admin() {
+		$_GET['tab']                            = 'diagnostics';
+		$GLOBALS['wpsc_test_current_user_can']  = true;
+		$GLOBALS['wpsc_test_enqueued_scripts']  = array();
+		$GLOBALS['wpsc_test_localized_scripts'] = array();
+
+		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache-network' );
+
+		$this->assertArrayHasKey( 'wpsc-diagnostics-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+		$this->assertStringContainsString( 'js/diagnostics.js', $GLOBALS['wpsc_test_enqueued_scripts']['wpsc-diagnostics-admin']['src'] );
+		$this->assertArrayHasKey( 'wpsc-diagnostics-admin', $GLOBALS['wpsc_test_localized_scripts'] );
+		$this->assertArrayHasKey( 'turboCacheDiag', $GLOBALS['wpsc_test_localized_scripts']['wpsc-diagnostics-admin'] );
 	}
 
 	/**

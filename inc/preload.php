@@ -599,8 +599,42 @@ function option_preload_cache_counter( $value ) {
 add_filter( 'option_preload_cache_counter', 'option_preload_cache_counter' );
 
 function check_up_on_preloading() {
+	global $cache_path;
+
+	// 1. Safe Preload watchdog check.
+	if ( apply_filters( 'turbo_cache_use_safe_preload', true ) && function_exists( 'turbo_cache_preload_get_state' ) ) {
+		$stop_flag = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : '' ) . 'stop_preload.txt';
+		if ( ! file_exists( $stop_flag ) ) {
+			$state = turbo_cache_preload_get_state();
+			if ( is_array( $state ) && isset( $state['status'] ) && 'running' === $state['status'] ) {
+				$last_update = isset( $state['updated_at'] ) && (int) $state['updated_at'] > 0
+					? (int) $state['updated_at']
+					: ( isset( $state['started_at'] ) ? (int) $state['started_at'] : 0 );
+
+				// Check if a worker lock exists and is actively progressing (< 600s old).
+				$lock_file  = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
+				$is_working = false;
+				if ( file_exists( $lock_file ) ) {
+					$mtime = @filemtime( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+					if ( $mtime && ( time() - $mtime ) < 600 ) {
+						$is_working = true;
+					}
+				}
+
+				// Only restart if the job is genuinely stalled (> 3600s), no live worker holds the lock,
+				// and no cron event is already queued.
+				if ( ! $is_working && $last_update > 0 && ( time() - $last_update ) > 3600 && false === wp_next_scheduled( 'wp_cache_preload_hook' ) ) {
+					wp_schedule_single_event( time() + 5, 'wp_cache_preload_hook' );
+				}
+				return;
+			}
+		}
+		return;
+	}
+
+	// 2. Legacy preload counter fallback when Safe Preload is not enabled.
 	$value = get_option( 'preload_cache_counter' );
-	if ( is_array( $value ) && $value['c'] > 0 && ( time() - $value['t'] ) > 3600 && false === wp_next_scheduled( 'wp_cache_preload_hook' ) ) {
+	if ( is_array( $value ) && isset( $value['c'], $value['t'] ) && $value['c'] > 0 && ( time() - $value['t'] ) > 3600 && false === wp_next_scheduled( 'wp_cache_preload_hook' ) ) {
 		wp_schedule_single_event( time() + 5, 'wp_cache_preload_hook' );
 	}
 }

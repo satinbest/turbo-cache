@@ -507,10 +507,29 @@ function turbo_cache_preload_get_state() {
  *
  * Uses a persistent coordination mutex file (`preload_coord.lock`) and PHP flock(LOCK_EX)
  * to serialize short metadata operations (lock acquisition, stale-lock recovery,
- * token verification, state generation validation, state commit, and reset transitions).
+/**
+ * Check whether the execution environment is an authorized test runner
+ * with test seams explicitly enabled.
  *
- * This eliminates multi-process TOCTOU races. Network requests and batch URL processing
- * happen strictly outside this critical section.
+ * In normal production execution, this always returns false to prevent
+ * arbitrary plugins from manipulating mutex paths or weakening locking exclusivity.
+ *
+ * @return bool True if test seam is active, false otherwise.
+ */
+function turbo_cache_preload_is_test_seam_active() {
+	if ( ! empty( $GLOBALS['wpsc_test_force_production_mode'] ) ) {
+		return false;
+	}
+
+	return ( defined( 'PHPUNIT_COMPOSER_INSTALL' ) || defined( 'WPSC_SMOKE_TEST' ) || defined( 'WP_TESTS_DOMAIN' ) )
+		&& ( isset( $GLOBALS['wpsc_test_filters'] ) || ! empty( $GLOBALS['wpsc_test_coordination_seam'] ) || defined( 'WPSC_TEST_SEAM_ENABLED' ) );
+}
+
+/**
+ * Execute a critical section callback under the persistent coordination mutex.
+ *
+ * Serializes state transitions, lock acquisition, and reset operations across
+ * all concurrent PHP processes (CLI, cron, web workers).
  *
  * @param callable $callback Operation to execute under exclusive coordination.
  * @return mixed Result of callback execution.
@@ -531,8 +550,13 @@ function turbo_cache_preload_with_coordination( $callback ) {
 	}
 
 	$mutex_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_coord.lock';
-	if ( function_exists( 'apply_filters' ) ) {
-		$mutex_file = apply_filters( 'turbo_cache_preload_coordination_file', $mutex_file );
+
+	// Test seam: only available in authorized test environments for deterministic failure testing.
+	if ( turbo_cache_preload_is_test_seam_active() && function_exists( 'apply_filters' ) ) {
+		$filtered_file = apply_filters( 'turbo_cache_preload_coordination_file', $mutex_file );
+		if ( is_string( $filtered_file ) && '' !== trim( $filtered_file ) ) {
+			$mutex_file = $filtered_file;
+		}
 	}
 
 	$dir = dirname( $mutex_file );
@@ -546,9 +570,12 @@ function turbo_cache_preload_with_coordination( $callback ) {
 		return false;
 	}
 
+	// Production execution must ALWAYS use exclusive locking (LOCK_EX).
 	$lock_flags = LOCK_EX;
-	if ( function_exists( 'apply_filters' ) ) {
-		$lock_flags = (int) apply_filters( 'turbo_cache_preload_coordination_flags', $lock_flags );
+	if ( turbo_cache_preload_is_test_seam_active() && function_exists( 'apply_filters' ) ) {
+		$filtered_flags = apply_filters( 'turbo_cache_preload_coordination_flags', $lock_flags );
+		// Ensure LOCK_EX is never stripped; only non-blocking (LOCK_NB) may be combined in tests.
+		$lock_flags = LOCK_EX | ( (int) $filtered_flags & LOCK_NB );
 	}
 
 	$locked = @flock( $fp, $lock_flags ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged

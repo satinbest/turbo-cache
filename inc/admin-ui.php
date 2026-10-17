@@ -46,7 +46,7 @@ add_action( 'network_admin_menu', 'wp_cache_network_pages' );
  * Load JavaScript on admin pages.
  */
 function wp_super_cache_admin_enqueue_scripts( $hook ) {
-	if ( 'settings_page_wpsupercache' !== $hook ) {
+	if ( 'settings_page_wpsupercache' !== $hook && 'settings_page_wpsupercache-network' !== $hook ) {
 		return;
 	}
 

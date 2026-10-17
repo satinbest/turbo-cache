@@ -145,8 +145,56 @@ class TurboCachePreloadAdminTest extends TestCase {
 		$this->assertArrayNotHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
 
 		$_GET['tab'] = 'preload';
-		wp_super_cache_admin_enqueue_scripts( 'tools_page_other' );
-		$this->assertArrayNotHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+		$rejected_hooks = array(
+			'tools_page_other',
+			'dashboard',
+			'edit.php',
+			'plugins.php',
+			'options-general.php',
+			'settings.php',
+			'settings_page_other',
+		);
+
+		foreach ( $rejected_hooks as $rejected_hook ) {
+			$GLOBALS['wpsc_test_enqueued_scripts'] = array();
+			wp_super_cache_admin_enqueue_scripts( $rejected_hook );
+			$this->assertArrayNotHasKey(
+				'wpsc-preload-admin',
+				$GLOBALS['wpsc_test_enqueued_scripts'],
+				"Script must not be enqueued on rejected hook: {$rejected_hook}"
+			);
+			$this->assertArrayNotHasKey(
+				'wp-super-cache-admin',
+				$GLOBALS['wpsc_test_enqueued_scripts'],
+				"Base admin script must not be enqueued on rejected hook: {$rejected_hook}"
+			);
+		}
+	}
+
+	/**
+	 * Test script is enqueued on Network Admin settings screen (BACKLOG-M3).
+	 */
+	public function test_admin_enqueue_scripts_on_network_admin() {
+		$_GET['tab'] = 'preload';
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		$GLOBALS['wpsc_test_enqueued_scripts'] = array();
+		$GLOBALS['wpsc_test_localized_scripts'] = array();
+
+		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache-network' );
+
+		// 1) Base admin script enqueued.
+		$this->assertArrayHasKey( 'wp-super-cache-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+		$this->assertArrayHasKey( 'wpscAdmin', $GLOBALS['wpsc_test_localized_scripts']['wp-super-cache-admin'] );
+
+		// 2) Preload admin script enqueued and localized.
+		$this->assertArrayHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+		$this->assertStringContainsString( 'js/preload.js', $GLOBALS['wpsc_test_enqueued_scripts']['wpsc-preload-admin']['src'] );
+		$this->assertArrayHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_localized_scripts'] );
+		$this->assertArrayHasKey( 'turboCachePreload', $GLOBALS['wpsc_test_localized_scripts']['wpsc-preload-admin'] );
+
+		$preload_config = $GLOBALS['wpsc_test_localized_scripts']['wpsc-preload-admin']['turboCachePreload'];
+		$this->assertNotEmpty( $preload_config['ajaxUrl'] );
+		$this->assertNotEmpty( $preload_config['nonce'] );
 	}
 
 	/**
@@ -157,6 +205,9 @@ class TurboCachePreloadAdminTest extends TestCase {
 		$GLOBALS['wpsc_test_current_user_can'] = false;
 
 		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache' );
+		$this->assertArrayNotHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
+
+		wp_super_cache_admin_enqueue_scripts( 'settings_page_wpsupercache-network' );
 		$this->assertArrayNotHasKey( 'wpsc-preload-admin', $GLOBALS['wpsc_test_enqueued_scripts'] );
 	}
 
@@ -485,6 +536,9 @@ class TurboCachePreloadAdminTest extends TestCase {
 		$this->assertStringContainsString( 'id="turbo-preload-batch-btn"', $output );
 		$this->assertStringContainsString( 'id="turbo-preload-refresh-btn"', $output );
 		$this->assertStringContainsString( 'id="turbo-preload-reset-btn"', $output );
+		$this->assertStringContainsString( 'class="dashicons dashicons-controls-play"', $output );
+		$this->assertStringContainsString( 'class="dashicons dashicons-update"', $output );
+		$this->assertStringContainsString( '<span class="turbo-btn-text">', $output );
 		$this->assertStringContainsString( 'id="turbo-preload-stat-discovered"', $output );
 		$this->assertStringContainsString( '42', $output );
 		$this->assertStringContainsString( 'id="turbo-preload-stat-processed"', $output );

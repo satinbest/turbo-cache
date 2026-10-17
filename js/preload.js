@@ -118,11 +118,22 @@
 					buttons[i].disabled = isBusy;
 				}
 			}
-			if (activeBtn && busyText) {
-				activeBtn.dataset.origText = activeBtn.textContent;
-				activeBtn.textContent = busyText;
-			} else if (activeBtn && !isBusy && activeBtn.dataset.origText) {
-				activeBtn.textContent = activeBtn.dataset.origText;
+			if (activeBtn) {
+				var labelSpan = activeBtn.querySelector('.turbo-btn-text');
+				var target = labelSpan || activeBtn;
+
+				if (isBusy && busyText) {
+					if (!target.getAttribute('data-orig-text')) {
+						target.setAttribute('data-orig-text', target.textContent);
+					}
+					target.textContent = busyText;
+				} else if (!isBusy) {
+					var orig = target.getAttribute('data-orig-text');
+					if (orig !== null && orig !== undefined) {
+						target.textContent = orig;
+						target.removeAttribute('data-orig-text');
+					}
+				}
 			}
 		}
 

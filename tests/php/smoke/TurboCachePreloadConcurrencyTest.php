@@ -983,4 +983,77 @@ class TurboCachePreloadConcurrencyTest extends TestCase {
 		// Cleanup Worker 2.
 		$this->assertTrue( turbo_cache_preload_release_lock( $w2_token ) );
 	}
+
+	/**
+	 * 24. Production filters cannot redirect the coordination file (SEC-HOOK-1).
+	 */
+	public function test_production_filters_cannot_redirect_coordination_file() {
+		$divergent_file = $this->temp_dir . 'nonexistent_subfolder_divergent/coord.lock';
+
+		add_filter(
+			'turbo_cache_preload_coordination_file',
+			function () use ( $divergent_file ) {
+				return $divergent_file;
+			}
+		);
+
+		// In production execution mode, the coordination filter must be completely ignored.
+		$GLOBALS['wpsc_test_force_production_mode'] = true;
+
+		$executed = false;
+		$res      = turbo_cache_preload_with_coordination(
+			function () use ( &$executed ) {
+				$executed = true;
+				return 'prod_success';
+			}
+		);
+
+		$this->assertSame( 'prod_success', $res, 'Production execution must succeed despite hostile coordination file filter' );
+		$this->assertTrue( $executed, 'Callback must execute using canonical coordination path in production' );
+		$this->assertFileExists( $this->temp_dir . 'preload_coord.lock', 'Canonical coordination file must be used in production' );
+		$this->assertFileDoesNotExist( $divergent_file, 'Divergent coordination file must not be touched in production' );
+
+		// Cleanup production simulation.
+		unset( $GLOBALS['wpsc_test_force_production_mode'] );
+		remove_all_filters( 'turbo_cache_preload_coordination_file' );
+	}
+
+	/**
+	 * 25. Production filters and test filters cannot weaken LOCK_EX exclusivity (SEC-HOOK-1).
+	 */
+	public function test_production_filters_cannot_weaken_lock_exclusivity() {
+		// Attempt to inject shared lock (LOCK_SH) or unlock (LOCK_UN) or zero.
+		add_filter(
+			'turbo_cache_preload_coordination_flags',
+			function () {
+				return LOCK_SH;
+			}
+		);
+
+		// 1) In production mode: filter is ignored entirely and LOCK_EX is used.
+		$GLOBALS['wpsc_test_force_production_mode'] = true;
+		$executed                                   = false;
+		$res                                        = turbo_cache_preload_with_coordination(
+			function () use ( &$executed ) {
+				$executed = true;
+				return 'exclusive_prod';
+			}
+		);
+		$this->assertSame( 'exclusive_prod', $res );
+		$this->assertTrue( $executed );
+		unset( $GLOBALS['wpsc_test_force_production_mode'] );
+
+		// 2) In test seam mode: even with filter active returning LOCK_SH, bitwise guard enforces LOCK_EX.
+		$executed = false;
+		$res      = turbo_cache_preload_with_coordination(
+			function () use ( &$executed ) {
+				$executed = true;
+				return 'exclusive_test_seam';
+			}
+		);
+		$this->assertSame( 'exclusive_test_seam', $res );
+		$this->assertTrue( $executed );
+
+		remove_all_filters( 'turbo_cache_preload_coordination_flags' );
+	}
 }
