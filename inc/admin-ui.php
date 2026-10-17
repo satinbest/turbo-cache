@@ -105,6 +105,40 @@ function wp_super_cache_admin_enqueue_scripts( $hook ) {
 			)
 		);
 	}
+
+	if ( 'preload' === $current_tab && current_user_can( 'manage_options' ) ) {
+		wp_enqueue_script(
+			'wpsc-preload-admin',
+			trailingslashit( plugin_dir_url( dirname( __DIR__ ) . '/wp-cache.php' ) ) . 'js/preload.js',
+			array(),
+			WPSC_VERSION_ID,
+			true
+		);
+
+		wp_localize_script(
+			'wpsc-preload-admin',
+			'turboCachePreload',
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( 'wpsc-preload-nonce' ),
+				'strings' => array(
+					'processing'     => __( 'Processing batch...', 'wp-super-cache' ),
+					'processNext'    => __( 'Process Next Batch', 'wp-super-cache' ),
+					'refreshing'     => __( 'Refreshing...', 'wp-super-cache' ),
+					'refresh'        => __( 'Refresh Status', 'wp-super-cache' ),
+					'resetting'      => __( 'Resetting...', 'wp-super-cache' ),
+					'reset'          => __( 'Reset Preload State', 'wp-super-cache' ),
+					'confirmReset'   => __( 'Are you sure you want to cancel and reset the preload state and queue?', 'wp-super-cache' ),
+					'errorGeneric'   => __( 'An error occurred while communicating with the server.', 'wp-super-cache' ),
+					'networkError'   => __( 'A network error occurred while communicating with the server.', 'wp-super-cache' ),
+					'timeoutError'   => __( 'The request timed out. Please try again.', 'wp-super-cache' ),
+					'batchSuccess'   => __( 'Preload batch processed successfully.', 'wp-super-cache' ),
+					'refreshSuccess' => __( 'Preload state refreshed.', 'wp-super-cache' ),
+					'resetSuccess'   => __( 'Preload state and queue reset successfully.', 'wp-super-cache' ),
+				),
+			)
+		);
+	}
 }
 add_action( 'admin_enqueue_scripts', 'wp_super_cache_admin_enqueue_scripts' );
 

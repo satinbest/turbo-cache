@@ -12,6 +12,8 @@
  * @package automattic/wp-super-cache
  */
 
+// phpcs:disable Universal.Files.SeparateFunctionsFromOO.Mixed
+
 require_once __DIR__ . '/../../vendor/autoload.php';
 
 /*
@@ -167,6 +169,21 @@ if ( ! function_exists( 'wp_remote_retrieve_header' ) ) {
 					return is_array( $v ) ? implode( ', ', $v ) : (string) $v;
 				}
 			}
+		}
+		return '';
+	}
+}
+
+if ( ! function_exists( 'wp_remote_retrieve_body' ) ) {
+	/**
+	 * Retrieve response body (test double for WordPress wp_remote_retrieve_body()).
+	 *
+	 * @param array $response HTTP response array.
+	 * @return string
+	 */
+	function wp_remote_retrieve_body( $response ) {
+		if ( is_array( $response ) && isset( $response['body'] ) ) {
+			return (string) $response['body'];
 		}
 		return '';
 	}
@@ -338,6 +355,21 @@ if ( ! function_exists( 'wp_create_nonce' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_nonce_field' ) ) {
+	function wp_nonce_field( $action = -1, $name = '_wpnonce', $referer = true, $echo = true ) {
+		$nonce = wp_create_nonce( $action );
+		$html  = '<input type="hidden" id="' . esc_attr( $name ) . '" name="' . esc_attr( $name ) . '" value="' . esc_attr( $nonce ) . '" />';
+		if ( $referer ) {
+			$html .= '<input type="hidden" name="_wp_http_referer" value="/wp-admin/" />';
+		}
+		if ( $echo ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+			echo $html;
+		}
+		return $html;
+	}
+}
+
 if ( ! function_exists( 'admin_url' ) ) {
 	function admin_url( $path = '', $scheme = 'admin' ) {
 		unset( $scheme );
@@ -488,8 +520,23 @@ if ( ! function_exists( 'checked' ) ) {
 	}
 }
 
+if ( ! function_exists( 'selected' ) ) {
+	function selected( $selected, $current = true, $echo = true ) {
+		$result = ( (string) $selected === (string) $current ) ? " selected='selected'" : '';
+		if ( $echo ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+			echo $result;
+		}
+		return $result;
+	}
+}
+
 if ( ! defined( 'WPSC_VERSION_ID' ) ) {
 	define( 'WPSC_VERSION_ID', '2.0.0-turbo' );
+}
+
+if ( ! defined( 'WPSC_PRELOAD_POST_COUNT' ) ) {
+	define( 'WPSC_PRELOAD_POST_COUNT', 10 );
 }
 
 if ( ! function_exists( 'wpsupercache_site_admin' ) ) {
@@ -510,6 +557,75 @@ if ( ! function_exists( 'add_submenu_page' ) ) {
 		unset( $args );
 		return true;
 	}
+}
+
+if ( ! function_exists( 'wp_next_scheduled' ) ) {
+	function wp_next_scheduled( $hook, $args = array() ) {
+		unset( $hook, $args );
+		return false;
+	}
+}
+
+if ( ! function_exists( 'wp_unschedule_event' ) ) {
+	function wp_unschedule_event( $timestamp, $hook, $args = array() ) {
+		unset( $timestamp, $hook, $args );
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_json_file_decode' ) ) {
+	function wp_json_file_decode( $filename, $options = array() ) {
+		if ( ! file_exists( $filename ) ) {
+			return null;
+		}
+		$content = file_get_contents( $filename );
+		if ( false === $content ) {
+			return null;
+		}
+		$assoc = isset( $options['associative'] ) ? (bool) $options['associative'] : false;
+		return json_decode( $content, $assoc );
+	}
+}
+
+if ( ! function_exists( 'wp_delete_file' ) ) {
+	function wp_delete_file( $file ) {
+		if ( file_exists( $file ) ) {
+			return @unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+		return true;
+	}
+}
+
+if ( ! function_exists( 'get_post_types' ) ) {
+	function get_post_types( $args = array(), $output = 'names', $operator = 'and' ) {
+		unset( $args, $output, $operator );
+		return array(
+			'post' => 'post',
+			'page' => 'page',
+		);
+	}
+}
+
+if ( ! function_exists( 'esc_sql' ) ) {
+	function esc_sql( $data ) {
+		return addslashes( (string) $data );
+	}
+}
+
+// phpcs:ignore Universal.Files.SeparateFunctionsFromOO.Mixed
+if ( ! class_exists( 'WpscSmokeTestWpdb' ) ) {
+	class WpscSmokeTestWpdb {
+		public $posts = 'wp_posts';
+		public function get_var( $query = null, $x = 0, $y = 0 ) {
+			unset( $query, $x, $y );
+			return 10;
+		}
+	}
+}
+
+if ( ! isset( $GLOBALS['wpdb'] ) ) {
+	// phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited
+	$GLOBALS['wpdb'] = new WpscSmokeTestWpdb();
 }
 
 /*

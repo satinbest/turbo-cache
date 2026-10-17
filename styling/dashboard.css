@@ -216,6 +216,36 @@
 	border: 1px solid #e5e7eb;
 }
 
+.turbo-status-idle {
+	background-color: #f3f4f6;
+	color: #4b5563;
+	border: 1px solid #e5e7eb;
+}
+
+.turbo-status-running {
+	background-color: #e0f2fe;
+	color: #0369a1;
+	border: 1px solid #bae6fd;
+}
+
+.turbo-status-paused {
+	background-color: #fef3c7;
+	color: #92400e;
+	border: 1px solid #fde68a;
+}
+
+.turbo-status-completed {
+	background-color: #d1fae5;
+	color: #065f46;
+	border: 1px solid #a7f3d0;
+}
+
+.turbo-status-cancelled {
+	background-color: #fee2e2;
+	color: #991b1b;
+	border: 1px solid #fecaca;
+}
+
 .turbo-cat-hit {
 	background-color: #d1fae5;
 	color: #065f46;

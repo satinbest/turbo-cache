@@ -26,6 +26,107 @@ function wpsc_ajax_get_preload_status() {
 add_action( 'wp_ajax_wpsc_get_preload_status', 'wpsc_ajax_get_preload_status' );
 
 /**
+ * Return sanitized, summary preload state safe for admin UI consumption.
+ *
+ * @param array $state Raw state from engine.
+ * @return array
+ */
+function wpsc_preload_format_admin_state( $state ) {
+	$stats = ( isset( $state['stats'] ) && is_array( $state['stats'] ) ) ? $state['stats'] : array();
+	return array(
+		'status'           => isset( $state['status'] ) ? sanitize_text_field( $state['status'] ) : 'idle',
+		'started_at'       => isset( $state['started_at'] ) ? (int) $state['started_at'] : 0,
+		'updated_at'       => isset( $state['updated_at'] ) ? (int) $state['updated_at'] : 0,
+		'finished_at'      => isset( $state['finished_at'] ) ? (int) $state['finished_at'] : 0,
+		'queue_cursor'     => isset( $state['queue_cursor'] ) ? (int) $state['queue_cursor'] : 0,
+		'total_discovered' => isset( $stats['total_discovered'] ) ? (int) $stats['total_discovered'] : 0,
+		'processed'        => isset( $stats['processed'] ) ? (int) $stats['processed'] : 0,
+		'cached'           => isset( $stats['cached'] ) ? (int) $stats['cached'] : 0,
+		'skipped'          => isset( $stats['skipped'] ) ? (int) $stats['skipped'] : 0,
+		'failed'           => isset( $stats['failed'] ) ? (int) $stats['failed'] : 0,
+		'last_error'       => ( isset( $state['last_error'] ) && is_string( $state['last_error'] ) ) ? sanitize_text_field( $state['last_error'] ) : null,
+	);
+}
+
+/**
+ * Serves an AJAX endpoint to return the authoritative Turbo Cache preload state.
+ */
+function wpsc_ajax_preload_get_state() {
+	check_ajax_referer( 'wpsc-preload-nonce' );
+
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wp-super-cache' ) ), 403 );
+	}
+
+	$state = turbo_cache_preload_get_state();
+	wp_send_json_success( wpsc_preload_format_admin_state( $state ) );
+}
+add_action( 'wp_ajax_wpsc_preload_get_state', 'wpsc_ajax_preload_get_state' );
+
+/**
+ * Serves an AJAX endpoint to execute a bounded preload batch on demand.
+ */
+function wpsc_ajax_preload_process_batch() {
+	check_ajax_referer( 'wpsc-preload-nonce' );
+
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wp-super-cache' ) ), 403 );
+	}
+
+	$batch_result = turbo_cache_preload_process_batch();
+	$state        = turbo_cache_preload_get_state();
+
+	wp_send_json_success(
+		array(
+			'batch' => $batch_result,
+			'state' => wpsc_preload_format_admin_state( $state ),
+		)
+	);
+}
+add_action( 'wp_ajax_wpsc_preload_process_batch', 'wpsc_ajax_preload_process_batch' );
+
+/**
+ * Serves an AJAX endpoint to safely reset the preload engine state and queue.
+ */
+function wpsc_ajax_preload_reset_state() {
+	global $cache_path;
+
+	check_ajax_referer( 'wpsc-preload-nonce' );
+
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wp-super-cache' ) ), 403 );
+	}
+
+	turbo_cache_preload_reset_state();
+
+	// Remove stop_preload.txt flag if present so subsequent runs are not immediately aborted.
+	if ( isset( $cache_path ) && '' !== $cache_path && file_exists( $cache_path . 'stop_preload.txt' ) ) {
+		@unlink( $cache_path . 'stop_preload.txt' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	}
+
+	wpsc_reset_preload_settings();
+
+	$next_preload      = function_exists( 'wp_next_scheduled' ) ? wp_next_scheduled( 'wp_cache_preload_hook' ) : false;
+	$next_full_preload = function_exists( 'wp_next_scheduled' ) ? wp_next_scheduled( 'wp_cache_full_preload_hook' ) : false;
+	if ( $next_preload && function_exists( 'wp_unschedule_event' ) ) {
+		wp_unschedule_event( $next_preload, 'wp_cache_preload_hook' );
+	}
+	if ( $next_full_preload && function_exists( 'wp_unschedule_event' ) ) {
+		wp_unschedule_event( $next_full_preload, 'wp_cache_full_preload_hook' );
+	}
+
+	$state = turbo_cache_preload_get_state();
+
+	wp_send_json_success(
+		array(
+			'message' => __( 'Preload state and queue reset successfully.', 'wp-super-cache' ),
+			'state'   => wpsc_preload_format_admin_state( $state ),
+		)
+	);
+}
+add_action( 'wp_ajax_wpsc_preload_reset_state', 'wpsc_ajax_preload_reset_state' );
+
+/**
  * Returns the location of the preload status file.
  */
 function wpsc_get_preload_status_file_path() {
