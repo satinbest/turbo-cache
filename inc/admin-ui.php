@@ -68,6 +68,40 @@ function wp_super_cache_admin_enqueue_scripts( $hook ) {
 			'boostActivateNonce'      => wp_create_nonce( 'activate-boost' ),
 		)
 	);
+
+	$current_tab = isset( $_GET['tab'] ) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+	if ( 'diagnostics' === $current_tab && current_user_can( 'manage_options' ) ) {
+		wp_enqueue_script(
+			'wpsc-diagnostics-admin',
+			trailingslashit( plugin_dir_url( dirname( __DIR__ ) . '/wp-cache.php' ) ) . 'js/diagnostics.js',
+			array(),
+			WPSC_VERSION_ID,
+			true
+		);
+
+		wp_localize_script(
+			'wpsc-diagnostics-admin',
+			'turboCacheDiag',
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( 'wpsc-diagnostics-nonce' ),
+				'strings' => array(
+					'confirmClear'  => __( 'Are you sure you want to clear all recorded cache diagnostic events? This action cannot be undone.', 'wp-super-cache' ),
+					'clearing'      => __( 'Clearing...', 'wp-super-cache' ),
+					'refreshing'    => __( 'Refreshing...', 'wp-super-cache' ),
+					'updating'      => __( 'Updating...', 'wp-super-cache' ),
+					'enabled'       => __( 'Enabled', 'wp-super-cache' ),
+					'disabled'      => __( 'Disabled', 'wp-super-cache' ),
+					'disable'       => __( 'Disable Logging', 'wp-super-cache' ),
+					'enable'        => __( 'Enable Logging', 'wp-super-cache' ),
+					'errorGeneric'  => __( 'An error occurred while communicating with the server.', 'wp-super-cache' ),
+					'clearSuccess'  => __( 'Diagnostic log cleared successfully.', 'wp-super-cache' ),
+					'toggleSuccess' => __( 'Diagnostic logging setting updated.', 'wp-super-cache' ),
+					'noEvents'      => __( 'No diagnostic events recorded yet.', 'wp-super-cache' ),
+				),
+			)
+		);
+	}
 }
 add_action( 'admin_enqueue_scripts', 'wp_super_cache_admin_enqueue_scripts' );
 
@@ -931,6 +965,9 @@ table.wpsc-settings-table {
 			wpsc_restore_settings();
 
 			break;
+		case 'diagnostics':
+			wpsc_render_partial( 'diagnostics' );
+			break;
 		case 'easy':
 		default:
 			wpsc_render_partial(
@@ -1072,9 +1109,10 @@ function wpsc_admin_tabs( $current = '' ) {
 		'settings' => __( 'Advanced', 'wp-super-cache' ),
 		'cdn'      => __( 'CDN', 'wp-super-cache' ),
 		'contents' => __( 'Contents', 'wp-super-cache' ),
-		'preload'  => __( 'Preload', 'wp-super-cache' ),
-		'plugins'  => __( 'Plugins', 'wp-super-cache' ),
-		'debug'    => __( 'Debug', 'wp-super-cache' ),
+		'preload'     => __( 'Preload', 'wp-super-cache' ),
+		'plugins'     => __( 'Plugins', 'wp-super-cache' ),
+		'debug'       => __( 'Debug', 'wp-super-cache' ),
+		'diagnostics' => __( 'Diagnostics', 'wp-super-cache' ),
 	);
 
 	echo '<div class="wpsc-nav-container"><ul class="wpsc-nav">';
@@ -1110,7 +1148,7 @@ function supercache_admin_bar_render() {
  * @param array  $page_vars - Variables made available for the template.
  */
 function wpsc_render_partial( $partial, array $page_vars = array() ) {
-	if ( ! str_ends_with( $partial, '.php' ) ) {
+	if ( substr( $partial, -4 ) !== '.php' ) {
 		$partial .= '.php';
 	}
 

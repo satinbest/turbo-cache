@@ -320,6 +320,198 @@ if ( ! function_exists( 'wp_send_json_error' ) ) {
 	}
 }
 
+if ( ! function_exists( 'add_action' ) ) {
+	function add_action( $hook_name, $callback, $priority = 10, $accepted_args = 1 ) {
+		return add_filter( $hook_name, $callback, $priority, $accepted_args );
+	}
+}
+
+if ( ! function_exists( 'do_action' ) ) {
+	function do_action( $hook_name, ...$args ) {
+		apply_filters( $hook_name, '', ...$args );
+	}
+}
+
+if ( ! function_exists( 'wp_create_nonce' ) ) {
+	function wp_create_nonce( $action = -1 ) {
+		return substr( md5( 'nonce_' . $action ), 0, 10 );
+	}
+}
+
+if ( ! function_exists( 'admin_url' ) ) {
+	function admin_url( $path = '', $scheme = 'admin' ) {
+		unset( $scheme );
+		return 'https://example.com/wp-admin/' . ltrim( $path, '/' );
+	}
+}
+
+if ( ! function_exists( 'plugin_dir_url' ) ) {
+	function plugin_dir_url( $file ) {
+		unset( $file );
+		return 'https://example.com/wp-content/plugins/wp-super-cache/';
+	}
+}
+
+if ( ! function_exists( 'plugin_dir_path' ) ) {
+	function plugin_dir_path( $file ) {
+		return dirname( $file ) . '/';
+	}
+}
+
+if ( ! function_exists( 'wp_enqueue_script' ) ) {
+	function wp_enqueue_script( $handle, $src = '', $deps = array(), $ver = false, $in_footer = false ) {
+		$GLOBALS['wpsc_test_enqueued_scripts'][ $handle ] = array(
+			'src'       => $src,
+			'deps'      => $deps,
+			'ver'       => $ver,
+			'in_footer' => $in_footer,
+		);
+	}
+}
+
+if ( ! function_exists( 'wp_localize_script' ) ) {
+	function wp_localize_script( $handle, $object_name, $l10n ) {
+		$GLOBALS['wpsc_test_localized_scripts'][ $handle ][ $object_name ] = $l10n;
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_unslash' ) ) {
+	function wp_unslash( $value ) {
+		return is_string( $value ) ? stripslashes( $value ) : $value;
+	}
+}
+
+if ( ! function_exists( 'sanitize_text_field' ) ) {
+	function sanitize_text_field( $str ) {
+		return trim( strip_tags( (string) $str ) );
+	}
+}
+
+if ( ! function_exists( 'sanitize_html_class' ) ) {
+	function sanitize_html_class( $class, $fallback = '' ) {
+		$sanitized = preg_replace( '|%[a-fA-F0-9][a-fA-F0-9]|', '', (string) $class );
+		$sanitized = preg_replace( '/[^A-Za-z0-9_-]/', '', $sanitized );
+		return '' === $sanitized ? $fallback : $sanitized;
+	}
+}
+
+if ( ! function_exists( 'esc_html' ) ) {
+	function esc_html( $text ) {
+		return htmlspecialchars( (string) $text, ENT_QUOTES, 'UTF-8' );
+	}
+}
+
+if ( ! function_exists( 'esc_html__' ) ) {
+	function esc_html__( $text, $domain = 'default' ) {
+		unset( $domain );
+		return esc_html( $text );
+	}
+}
+
+if ( ! function_exists( 'esc_html_e' ) ) {
+	function esc_html_e( $text, $domain = 'default' ) {
+		unset( $domain );
+		echo esc_html( $text );
+	}
+}
+
+if ( ! function_exists( 'esc_attr' ) ) {
+	function esc_attr( $text ) {
+		return htmlspecialchars( (string) $text, ENT_QUOTES, 'UTF-8' );
+	}
+}
+
+if ( ! function_exists( 'esc_url' ) ) {
+	function esc_url( $url ) {
+		$sanitized = filter_var( $url, FILTER_SANITIZE_URL );
+		return false !== $sanitized ? $sanitized : '';
+	}
+}
+
+if ( ! function_exists( 'esc_url_raw' ) ) {
+	function esc_url_raw( $url ) {
+		$sanitized = filter_var( $url, FILTER_SANITIZE_URL );
+		return false !== $sanitized ? $sanitized : '';
+	}
+}
+
+if ( ! function_exists( '__' ) ) {
+	function __( $text, $domain = 'default' ) {
+		unset( $domain );
+		return (string) $text;
+	}
+}
+
+if ( ! function_exists( '_e' ) ) {
+	function _e( $text, $domain = 'default' ) {
+		unset( $domain );
+		echo esc_html( (string) $text );
+	}
+}
+
+if ( ! function_exists( 'add_query_arg' ) ) {
+	function add_query_arg( ...$args ) {
+		if ( is_array( $args[0] ) ) {
+			$new_params = $args[0];
+			$url        = isset( $args[1] ) ? $args[1] : '';
+		} else {
+			$new_params = array( $args[0] => $args[1] );
+			$url        = isset( $args[2] ) ? $args[2] : '';
+		}
+		$sep = strpos( $url, '?' ) !== false ? '&' : '?';
+		return $url . $sep . http_build_query( $new_params );
+	}
+}
+
+if ( ! function_exists( 'wp_die' ) ) {
+	function wp_die( $message = '', $title = '', $args = array() ) {
+		unset( $title, $args );
+		throw new RuntimeException( 'wp_die: ' . (string) $message );
+	}
+}
+
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	function wp_json_encode( $data, $options = 0, $depth = 512 ) {
+		return json_encode( $data, $options, $depth );
+	}
+}
+
+if ( ! function_exists( 'checked' ) ) {
+	function checked( $checked, $current = true, $echo = true ) {
+		$result = ( (string) $checked === (string) $current ) ? " checked='checked'" : '';
+		if ( $echo ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+			echo $result;
+		}
+		return $result;
+	}
+}
+
+if ( ! defined( 'WPSC_VERSION_ID' ) ) {
+	define( 'WPSC_VERSION_ID', '2.0.0-turbo' );
+}
+
+if ( ! function_exists( 'wpsupercache_site_admin' ) ) {
+	function wpsupercache_site_admin() {
+		return true;
+	}
+}
+
+if ( ! function_exists( 'add_options_page' ) ) {
+	function add_options_page( ...$args ) {
+		unset( $args );
+		return true;
+	}
+}
+
+if ( ! function_exists( 'add_submenu_page' ) ) {
+	function add_submenu_page( ...$args ) {
+		unset( $args );
+		return true;
+	}
+}
+
 /*
  * Load the procedural caching engine. Its functions become callable from tests.
  * require_once keeps test files that also require it (for self-documentation)

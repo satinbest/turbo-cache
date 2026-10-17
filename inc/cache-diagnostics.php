@@ -351,7 +351,7 @@ function turbo_cache_diagnostics_record( $outcome, $reason = '', $details = arra
 		'timestamp' => time(),
 		'outcome'   => (string) $outcome,
 		'category'  => $category,
-		'reason'    => strip_tags( (string) $reason ),
+		'reason'    => is_string( $reason ) ? strip_tags( $reason ) : ( is_scalar( $reason ) ? (string) $reason : '' ),
 		'method'    => $method,
 		'uri'       => $uri,
 		'details'   => turbo_cache_diagnostics_sanitize_data( (array) $details ),
