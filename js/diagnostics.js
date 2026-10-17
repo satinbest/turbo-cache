@@ -38,6 +38,13 @@
 		var statGeneration = document.getElementById('stat-cat-generation');
 		var statPreload = document.getElementById('stat-cat-preload');
 
+		var preloadContainer = document.getElementById('turbo-preload-accounting');
+		var statPreloadDiscovered = document.getElementById('stat-preload-discovered');
+		var statPreloadProcessed = document.getElementById('stat-preload-processed');
+		var statPreloadCached = document.getElementById('stat-preload-cached');
+		var statPreloadSkipped = document.getElementById('stat-preload-skipped');
+		var statPreloadFailed = document.getElementById('stat-preload-failed');
+
 		var feedbackTimer = null;
 
 		function showFeedback(message, type) {
@@ -59,36 +66,59 @@
 			}, 6000);
 		}
 
-		function sendAjax(action, extraData, callback) {
-			var xhr = new XMLHttpRequest();
-			xhr.open('POST', ajaxUrl, true);
-			xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
-
-			var params = ['action=' + encodeURIComponent(action), '_ajax_nonce=' + encodeURIComponent(nonce)];
-			if (extraData) {
-				for (var key in extraData) {
-					if (Object.prototype.hasOwnProperty.call(extraData, key)) {
-						params.push(encodeURIComponent(key) + '=' + encodeURIComponent(extraData[key]));
-					}
-				}
+		function getErrorMessage(err) {
+			if (err && err.message === 'Request timed out') {
+				return strings.timeoutError || 'The request timed out. Please try again.';
 			}
+			if (err && err.message === 'Network error') {
+				return strings.networkError || 'A network error occurred while communicating with the server.';
+			}
+			return strings.errorGeneric || 'An error occurred while communicating with the server.';
+		}
 
-			xhr.onreadystatechange = function() {
-				if (xhr.readyState === 4) {
-					if (xhr.status >= 200 && xhr.status < 300) {
-						try {
-							var res = JSON.parse(xhr.responseText);
-							callback(null, res);
-						} catch (e) {
-							callback(new Error('Invalid JSON response'));
+		function sendAjax(action, extraData, callback) {
+			try {
+				var xhr = new XMLHttpRequest();
+				xhr.open('POST', ajaxUrl, true);
+				xhr.timeout = 25000;
+				xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+
+				var params = ['action=' + encodeURIComponent(action), '_ajax_nonce=' + encodeURIComponent(nonce)];
+				if (extraData) {
+					for (var key in extraData) {
+						if (Object.prototype.hasOwnProperty.call(extraData, key)) {
+							params.push(encodeURIComponent(key) + '=' + encodeURIComponent(extraData[key]));
 						}
-					} else {
-						callback(new Error('HTTP Error: ' + xhr.status));
 					}
 				}
-			};
 
-			xhr.send(params.join('&'));
+				xhr.onreadystatechange = function() {
+					if (xhr.readyState === 4) {
+						if (xhr.status >= 200 && xhr.status < 300) {
+							try {
+								var res = JSON.parse(xhr.responseText);
+								callback(null, res);
+							} catch (e) {
+								callback(new Error('Invalid JSON response'));
+							}
+						} else if (xhr.status > 0) {
+							callback(new Error('HTTP Error: ' + xhr.status));
+						}
+					}
+				};
+
+				xhr.onerror = function() {
+					callback(new Error('Network error'));
+				};
+
+				xhr.ontimeout = function() {
+					callback(new Error('Request timed out'));
+				};
+
+				xhr.send(params.join('&'));
+			} catch (e) {
+				callback(e);
+			}
 		}
 
 		function formatDate(timestamp) {
@@ -132,7 +162,7 @@
 					toggleBtn.disabled = false;
 					if (err || !res || !res.success) {
 						toggleBtn.textContent = origText;
-						showFeedback(strings.errorGeneric || 'Operation failed.', 'error');
+						showFeedback(getErrorMessage(err), 'error');
 						return;
 					}
 
@@ -170,7 +200,7 @@
 					clearBtn.textContent = origText;
 
 					if (err || !res || !res.success) {
-						showFeedback(strings.errorGeneric || 'Failed to clear logs.', 'error');
+						showFeedback(getErrorMessage(err), 'error');
 						return;
 					}
 
@@ -226,7 +256,7 @@
 					refreshBtn.innerHTML = origHtml;
 
 					if (err || !res || !res.success || !res.data) {
-						showFeedback(strings.errorGeneric || 'Failed to refresh diagnostic data.', 'error');
+						showFeedback(getErrorMessage(err), 'error');
 						return;
 					}
 
@@ -241,6 +271,20 @@
 					if (statBypass) statBypass.textContent = String(byCat.bypass || 0);
 					if (statGeneration) statGeneration.textContent = String(byCat.generation || 0);
 					if (statPreload) statPreload.textContent = String(byCat.preload || 0);
+
+					// Update preload accounting if available
+					if (preloadContainer) {
+						if (summary.preload && summary.preload.total_discovered > 0) {
+							if (statPreloadDiscovered) statPreloadDiscovered.textContent = String(summary.preload.total_discovered || 0);
+							if (statPreloadProcessed) statPreloadProcessed.textContent = String(summary.preload.processed || 0);
+							if (statPreloadCached) statPreloadCached.textContent = String(summary.preload.cached || 0);
+							if (statPreloadSkipped) statPreloadSkipped.textContent = String(summary.preload.skipped || 0);
+							if (statPreloadFailed) statPreloadFailed.textContent = String(summary.preload.failed || 0);
+							preloadContainer.style.display = 'block';
+						} else {
+							preloadContainer.style.display = 'none';
+						}
+					}
 
 					// Update outcome breakdown
 					if (outcomePills) {
@@ -356,7 +400,7 @@
 						}
 					}
 
-					showFeedback('Diagnostic data refreshed.', 'success');
+					showFeedback(strings.refreshSuccess || 'Diagnostic data refreshed successfully.', 'success');
 				});
 			});
 		}

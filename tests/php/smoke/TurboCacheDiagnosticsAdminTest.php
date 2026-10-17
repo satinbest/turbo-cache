@@ -276,6 +276,37 @@ class TurboCacheDiagnosticsAdminTest extends TestCase {
 	}
 
 	/**
+	 * Test wpsc_ajax_clear_diagnostics fails without capability.
+	 */
+	public function test_ajax_clear_diagnostics_unauthorized() {
+		$GLOBALS['wpsc_test_current_user_can'] = false;
+
+		try {
+			wpsc_ajax_clear_diagnostics();
+			$this->fail( 'Expected wp_send_json_error exception' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'wp_send_json_error', $e->getMessage() );
+		}
+
+		$response = $GLOBALS['wpsc_test_last_json_response'];
+		$this->assertFalse( $response['success'] );
+		$this->assertSame( 403, $response['code'] );
+	}
+
+	/**
+	 * Test wpsc_ajax_clear_diagnostics fails with invalid nonce.
+	 */
+	public function test_ajax_clear_diagnostics_invalid_nonce() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		$GLOBALS['wpsc_test_fail_nonce']       = true;
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'Nonce verification failed' );
+
+		wpsc_ajax_clear_diagnostics();
+	}
+
+	/**
 	 * Test wpsc_ajax_get_diagnostics returns actual data.
 	 */
 	public function test_ajax_get_diagnostics_success() {
@@ -306,6 +337,81 @@ class TurboCacheDiagnosticsAdminTest extends TestCase {
 		// Most recent first:
 		$this->assertSame( 'BYPASS_COOKIE', $recent[0]['outcome'] );
 		$this->assertSame( 'HIT_FRESH', $recent[1]['outcome'] );
+	}
+
+	/**
+	 * Test wpsc_ajax_get_diagnostics fails without capability.
+	 */
+	public function test_ajax_get_diagnostics_unauthorized() {
+		$GLOBALS['wpsc_test_current_user_can'] = false;
+
+		try {
+			wpsc_ajax_get_diagnostics();
+			$this->fail( 'Expected wp_send_json_error exception' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'wp_send_json_error', $e->getMessage() );
+		}
+
+		$response = $GLOBALS['wpsc_test_last_json_response'];
+		$this->assertFalse( $response['success'] );
+		$this->assertSame( 403, $response['code'] );
+	}
+
+	/**
+	 * Test wpsc_ajax_get_diagnostics fails with invalid nonce.
+	 */
+	public function test_ajax_get_diagnostics_invalid_nonce() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		$GLOBALS['wpsc_test_fail_nonce']       = true;
+
+		$this->expectException( RuntimeException::class );
+		$this->expectExceptionMessage( 'Nonce verification failed' );
+
+		wpsc_ajax_get_diagnostics();
+	}
+
+	/**
+	 * Test wpsc_ajax_get_diagnostics returns server-side redacted sensitive data.
+	 */
+	public function test_ajax_get_diagnostics_server_side_redaction() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		turbo_cache_diagnostics_set_enabled( true );
+
+		$_SERVER['REQUEST_URI'] = '/checkout/?token=SECRET123&password=MYPASS&_wpnonce=NONCE999';
+		turbo_cache_diagnostics_record(
+			'BYPASS_SENSITIVE',
+			'Sensitive request parameter check',
+			array(
+				'auth_key'   => 'SUPER_SECRET_KEY',
+				'cookie'     => array( 'wordpress_logged_in' => 'HASH123' ),
+				'safe_param' => 'public-value',
+			)
+		);
+
+		try {
+			wpsc_ajax_get_diagnostics();
+			$this->fail( 'Expected wp_send_json_success exception' );
+		} catch ( RuntimeException $e ) {
+			$this->assertSame( 'wp_send_json_success', $e->getMessage() );
+		}
+
+		$response = $GLOBALS['wpsc_test_last_json_response'];
+		$this->assertTrue( $response['success'] );
+		$recent = $response['data']['recent'];
+		$this->assertCount( 1, $recent );
+
+		$event = $recent[0];
+		// Assert sensitive query params were redacted on server
+		$this->assertStringNotContainsString( 'SECRET123', $event['uri'] );
+		$this->assertStringNotContainsString( 'MYPASS', $event['uri'] );
+		$this->assertStringNotContainsString( 'NONCE999', $event['uri'] );
+		$this->assertStringContainsString( 'token=%5BREDACTED%5D', $event['uri'] );
+
+		// Assert details keys and cookies were redacted on server
+		$this->assertStringNotContainsString( 'SUPER_SECRET_KEY', wp_json_encode( $event['details'] ) );
+		$this->assertStringNotContainsString( 'HASH123', wp_json_encode( $event['details'] ) );
+		$this->assertSame( '[REDACTED]', $event['details']['auth_key'] );
+		$this->assertSame( 'public-value', $event['details']['safe_param'] );
 	}
 
 	/**
@@ -370,5 +476,72 @@ class TurboCacheDiagnosticsAdminTest extends TestCase {
 		wpsc_render_partial( 'diagnostics.php' );
 		$output2 = ob_get_clean();
 		$this->assertStringContainsString( 'id="turbo-cache-diagnostics-app"', $output2 );
+	}
+
+	/**
+	 * Test partial rendering when log is completely empty.
+	 */
+	public function test_diagnostics_partial_with_empty_log() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		turbo_cache_diagnostics_clear_log();
+
+		ob_start();
+		wpsc_render_partial( 'diagnostics' );
+		$output = ob_get_clean();
+
+		$this->assertStringContainsString( 'No diagnostic events recorded.', $output );
+		$this->assertStringContainsString( 'No outcome codes recorded yet.', $output );
+		$this->assertStringContainsString( 'id="stat-total-recorded">0</div>', $output );
+	}
+
+	/**
+	 * Test partial rendering with active preload statistics.
+	 */
+	public function test_diagnostics_partial_with_preload_stats() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+
+		// Mock preload state in transient/option
+		$preload_state = array(
+			'stats' => array(
+				'total_discovered' => 42,
+				'processed'        => 30,
+				'cached'           => 28,
+				'skipped'          => 2,
+				'failed'           => 0,
+				'skip_reasons'     => array(),
+			),
+		);
+		$GLOBALS['wpsc_test_options']['turbo_cache_preload_state'] = $preload_state;
+
+		ob_start();
+		wpsc_render_partial( 'diagnostics' );
+		$output = ob_get_clean();
+
+		unset( $GLOBALS['wpsc_test_options']['turbo_cache_preload_state'] );
+
+		$this->assertStringContainsString( 'id="turbo-preload-accounting"', $output );
+		$this->assertStringContainsString( 'id="stat-preload-discovered">42</strong>', $output );
+		$this->assertStringContainsString( 'id="stat-preload-cached">28</strong>', $output );
+	}
+
+	/**
+	 * Test partial rendering with extreme URI and reason string lengths.
+	 */
+	public function test_diagnostics_partial_with_extreme_lengths() {
+		$GLOBALS['wpsc_test_current_user_can'] = true;
+		turbo_cache_diagnostics_set_enabled( true );
+
+		$long_uri    = '/test/' . str_repeat( 'a', 1500 );
+		$long_reason = 'Reason: ' . str_repeat( 'word ', 200 );
+
+		$_SERVER['REQUEST_URI'] = $long_uri;
+		turbo_cache_diagnostics_record( 'BYPASS_LONG', $long_reason, array( 'size' => 100 ) );
+
+		ob_start();
+		wpsc_render_partial( 'diagnostics' );
+		$output = ob_get_clean();
+
+		$this->assertStringContainsString( 'BYPASS_LONG', $output );
+		$this->assertStringContainsString( 'Reason: word word', $output );
 	}
 }

@@ -104,22 +104,19 @@ $recent_events   = turbo_cache_diagnostics_get_recent_log( 50 );
 			?>
 		</div>
 
-		<?php if ( ! empty( $summary['preload'] ) && ! empty( $summary['preload']['total_discovered'] ) ) : ?>
+		<?php
+		$has_preload_stats = ! empty( $summary['preload'] ) && ! empty( $summary['preload']['total_discovered'] );
+		?>
+		<div id="turbo-preload-accounting" style="<?php echo $has_preload_stats ? '' : 'display: none;'; ?>">
 			<h4 style="margin-top: 1.5em;"><?php esc_html_e( 'Preload Accounting (Phase 8/9 Engine)', 'wp-super-cache' ); ?></h4>
 			<p class="description">
-				<?php
-				printf(
-					/* translators: 1: Discovered, 2: Processed, 3: Cached, 4: Skipped, 5: Failed */
-					esc_html__( 'Discovered: %1$d | Processed: %2$d | Verified Cached on Disk: %3$d | Skipped: %4$d | Failed: %5$d', 'wp-super-cache' ),
-					(int) $summary['preload']['total_discovered'],
-					(int) $summary['preload']['processed'],
-					(int) $summary['preload']['cached'],
-					(int) $summary['preload']['skipped'],
-					(int) $summary['preload']['failed']
-				);
-				?>
+				<?php esc_html_e( 'Discovered:', 'wp-super-cache' ); ?> <strong id="stat-preload-discovered"><?php echo (int) ( $has_preload_stats ? $summary['preload']['total_discovered'] : 0 ); ?></strong> |
+				<?php esc_html_e( 'Processed:', 'wp-super-cache' ); ?> <strong id="stat-preload-processed"><?php echo (int) ( $has_preload_stats ? $summary['preload']['processed'] : 0 ); ?></strong> |
+				<?php esc_html_e( 'Verified Cached on Disk:', 'wp-super-cache' ); ?> <strong id="stat-preload-cached"><?php echo (int) ( $has_preload_stats ? $summary['preload']['cached'] : 0 ); ?></strong> |
+				<?php esc_html_e( 'Skipped:', 'wp-super-cache' ); ?> <strong id="stat-preload-skipped"><?php echo (int) ( $has_preload_stats ? $summary['preload']['skipped'] : 0 ); ?></strong> |
+				<?php esc_html_e( 'Failed:', 'wp-super-cache' ); ?> <strong id="stat-preload-failed"><?php echo (int) ( $has_preload_stats ? $summary['preload']['failed'] : 0 ); ?></strong>
 			</p>
-		<?php endif; ?>
+		</div>
 	</div>
 
 	<!-- Recent Events Log Card -->

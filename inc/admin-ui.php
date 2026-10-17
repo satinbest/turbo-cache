@@ -94,10 +94,13 @@ function wp_super_cache_admin_enqueue_scripts( $hook ) {
 					'disabled'      => __( 'Disabled', 'wp-super-cache' ),
 					'disable'       => __( 'Disable Logging', 'wp-super-cache' ),
 					'enable'        => __( 'Enable Logging', 'wp-super-cache' ),
-					'errorGeneric'  => __( 'An error occurred while communicating with the server.', 'wp-super-cache' ),
-					'clearSuccess'  => __( 'Diagnostic log cleared successfully.', 'wp-super-cache' ),
-					'toggleSuccess' => __( 'Diagnostic logging setting updated.', 'wp-super-cache' ),
-					'noEvents'      => __( 'No diagnostic events recorded yet.', 'wp-super-cache' ),
+					'errorGeneric'   => __( 'An error occurred while communicating with the server.', 'wp-super-cache' ),
+					'networkError'   => __( 'A network error occurred while communicating with the server.', 'wp-super-cache' ),
+					'timeoutError'   => __( 'The request timed out. Please try again.', 'wp-super-cache' ),
+					'clearSuccess'   => __( 'Diagnostic log cleared successfully.', 'wp-super-cache' ),
+					'toggleSuccess'  => __( 'Diagnostic logging setting updated.', 'wp-super-cache' ),
+					'refreshSuccess' => __( 'Diagnostic data refreshed successfully.', 'wp-super-cache' ),
+					'noEvents'       => __( 'No diagnostic events recorded yet.', 'wp-super-cache' ),
 				),
 			)
 		);
