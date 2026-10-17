@@ -243,6 +243,83 @@ if ( ! function_exists( 'trailingslashit' ) ) {
 	}
 }
 
+if ( ! function_exists( 'check_ajax_referer' ) ) {
+	/**
+	 * Test double for WordPress check_ajax_referer().
+	 *
+	 * @param int|string   $action    Action nonce.
+	 * @param false|string $query_arg Key to check for nonce in $_REQUEST.
+	 * @param bool         $die       Whether to die if nonce is invalid.
+	 * @return int|false
+	 * @throws RuntimeException When nonce is set to fail.
+	 */
+	function check_ajax_referer( $action = -1, $query_arg = false, $die = true ) {
+		if ( ! empty( $GLOBALS['wpsc_test_fail_nonce'] ) ) {
+			if ( $die ) {
+				throw new RuntimeException( 'Nonce verification failed' );
+			}
+			return false;
+		}
+		return 1;
+	}
+}
+
+if ( ! function_exists( 'current_user_can' ) ) {
+	/**
+	 * Test double for WordPress current_user_can().
+	 *
+	 * @param string $capability Capability name.
+	 * @return bool
+	 */
+	function current_user_can( $capability ) {
+		unset( $capability );
+		if ( isset( $GLOBALS['wpsc_test_current_user_can'] ) ) {
+			return (bool) $GLOBALS['wpsc_test_current_user_can'];
+		}
+		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_send_json_success' ) ) {
+	/**
+	 * Test double for WordPress wp_send_json_success().
+	 *
+	 * @param mixed $data        Data to encode.
+	 * @param int   $status_code HTTP status code.
+	 * @param int   $options     json_encode options.
+	 * @throws RuntimeException Exit simulation.
+	 */
+	function wp_send_json_success( $data = null, $status_code = null, $options = 0 ) {
+		unset( $options );
+		$GLOBALS['wpsc_test_last_json_response'] = array(
+			'success' => true,
+			'data'    => $data,
+			'code'    => $status_code,
+		);
+		throw new RuntimeException( 'wp_send_json_success' );
+	}
+}
+
+if ( ! function_exists( 'wp_send_json_error' ) ) {
+	/**
+	 * Test double for WordPress wp_send_json_error().
+	 *
+	 * @param mixed $data        Data to encode.
+	 * @param int   $status_code HTTP status code.
+	 * @param int   $options     json_encode options.
+	 * @throws RuntimeException Exit simulation.
+	 */
+	function wp_send_json_error( $data = null, $status_code = null, $options = 0 ) {
+		unset( $options );
+		$GLOBALS['wpsc_test_last_json_response'] = array(
+			'success' => false,
+			'data'    => $data,
+			'code'    => $status_code,
+		);
+		throw new RuntimeException( 'wp_send_json_error' );
+	}
+}
+
 /*
  * Load the procedural caching engine. Its functions become callable from tests.
  * require_once keeps test files that also require it (for self-documentation)

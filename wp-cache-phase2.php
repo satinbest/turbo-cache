@@ -14,6 +14,7 @@ require_once __DIR__ . '/inc/cache-invalidation.php';
 require_once __DIR__ . '/inc/cache-delivery.php';
 require_once __DIR__ . '/inc/cache-maintenance.php';
 require_once __DIR__ . '/inc/preload-engine.php';
+require_once __DIR__ . '/inc/cache-diagnostics.php';
 
 function gzip_accepted() {
 	if ( 1 == ini_get( 'zlib.output_compression' ) || 'on' == strtolower( ini_get( 'zlib.output_compression' ) ) ) { // don't compress WP-Cache data files when PHP is already doing it
@@ -139,31 +140,52 @@ function wp_cache_serve_cache_file() {
 
 	if ( defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE ) {
 		wp_cache_debug( 'wp_cache_serve_cache_file: DONOTCACHEPAGE defined. Not serving cached file.' );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			turbo_cache_diagnostics_record( 'BYPASS_CUSTOM_FILTER', 'DONOTCACHEPAGE defined' );
+		}
 		return false;
 	}
 
 	if ( function_exists( 'turbo_cache_check_request_safety' ) && ( $safety_bypass = turbo_cache_check_request_safety() ) ) {
 		wp_cache_debug( 'wp_cache_serve_cache_file: request safety bypass (' . $safety_bypass . '). Not serving cached file.' );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			$diag_outcome = function_exists( 'turbo_cache_diagnostics_map_bypass_reason' )
+				? turbo_cache_diagnostics_map_bypass_reason( $safety_bypass )
+				: 'BYPASS_REQUEST_SAFETY';
+			turbo_cache_diagnostics_record( $diag_outcome, $safety_bypass );
+		}
 		return false;
 	}
 
 	if ( wpsc_is_backend() ) {
 		wp_cache_debug( 'Not serving wp-admin requests.', 5 );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			turbo_cache_diagnostics_record( 'BYPASS_BACKEND', 'wp-admin requests' );
+		}
 		return false;
 	}
 
 	if ( $wp_cache_no_cache_for_get && wpsc_is_get_query() ) {
 		wp_cache_debug( 'Non empty GET request. Caching disabled on settings page. ' . wpsc_dump_get_request(), 1 );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			turbo_cache_diagnostics_record( 'BYPASS_QUERY_PARAMS', 'Non empty GET request' );
+		}
 		return false;
 	}
 
 	if ( defined( 'WPSC_SERVE_DISABLED' ) ) {
 		wp_cache_debug( 'wp_cache_serve_cache_file: WPSC_SERVE_DISABLED defined. Not serving cached files.' );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			turbo_cache_diagnostics_record( 'BYPASS_DISABLED', 'WPSC_SERVE_DISABLED defined' );
+		}
 		return false;
 	}
 
 	if ( wpsc_get_accept_header() !== 'text/html' ) {
 		wp_cache_debug( 'wp_cache_serve_cache_file: visitor does not accept text/html. Not serving cached file.' );
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			turbo_cache_diagnostics_record( 'BYPASS_REQUEST_SAFETY', 'Visitor does not accept text/html' );
+		}
 		return false;
 	}
 
@@ -210,21 +232,39 @@ function wp_cache_serve_cache_file() {
 		$file = function_exists( 'turbo_cache_get_cache_filepath' ) ? turbo_cache_get_cache_filepath() : ( get_current_url_supercache_dir() . supercache_filename() );
 		if ( false == file_exists( $file ) ) {
 			wp_cache_debug( "No Super Cache file found for current URL: $file" );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'MISS_FILE_MISSING', 'Cache file does not exist on disk', array( 'file' => basename( $file ) ) );
+			}
 			return false;
 		} elseif ( wpsc_is_get_query() ) {
 			wp_cache_debug( 'GET array not empty. Cannot serve a supercache file. ' . wpsc_dump_get_request() );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'BYPASS_QUERY_PARAMS', 'GET array not empty' );
+			}
 			return false;
 		} elseif ( wp_cache_get_cookies_values() != '' ) {
 			wp_cache_debug( 'Cookies found. Cannot serve a supercache file. ' . wp_cache_get_cookies_values() );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'BYPASS_COOKIES_OR_PERSONALIZATION', 'Cookies found in request' );
+			}
 			return false;
 		} elseif ( wpsc_get_accept_header() !== 'text/html' ) {
 			wp_cache_debug( 'Accept header is not text/html. Cannot serve supercache file.' . wp_cache_get_cookies_values() );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'BYPASS_REQUEST_SAFETY', 'Accept header is not text/html' );
+			}
 			return false;
 		} elseif ( isset( $wpsc_save_headers ) && $wpsc_save_headers ) {
 			wp_cache_debug( 'Saving headers. Cannot serve a supercache file.' );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'BYPASS_REQUEST_SAFETY', 'Saving headers' );
+			}
 			return false;
 		} elseif ( $cache_max_time > 0 && ( filemtime( $file ) + $cache_max_time ) < time() ) {
 			wp_cache_debug( sprintf( 'Cache has expired and is older than %d seconds old.', $cache_max_time ) );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'MISS_EXPIRED', 'Cache file has expired', array( 'mtime' => filemtime( $file ), 'max_age' => $cache_max_time ) );
+			}
 			return false;
 		}
 
@@ -257,6 +297,9 @@ function wp_cache_serve_cache_file() {
 
 						if ( false === $cachefiledata ) {
 							wp_cache_debug( 'The cached gzip file could not be read. Must generate a new one.' );
+							if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+								turbo_cache_diagnostics_record( 'MISS_FILE_UNREADABLE', 'Cache gzip file exists but could not be read', array( 'file' => basename( $file . '.gz' ) ) );
+							}
 							return false;
 						}
 
@@ -266,6 +309,9 @@ function wp_cache_serve_cache_file() {
 
 						if ( false === $cachefiledata ) {
 							wp_cache_debug( 'The cached file could not be read. Must generate a new one.' );
+							if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+								turbo_cache_diagnostics_record( 'MISS_FILE_UNREADABLE', 'Cache file exists but could not be read', array( 'file' => basename( $file ) ) );
+							}
 							return false;
 						}
 
@@ -277,6 +323,9 @@ function wp_cache_serve_cache_file() {
 
 					if ( false === $cachefiledata ) {
 						wp_cache_debug( 'The cached file could not be read. Must generate a new one.' );
+						if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+							turbo_cache_diagnostics_record( 'MISS_FILE_UNREADABLE', 'Cache file exists but could not be read', array( 'file' => basename( $file ) ) );
+						}
 						return false;
 					}
 
@@ -362,11 +411,35 @@ function wp_cache_serve_cache_file() {
 				if ( $remote_mod_time !== null && $remote_mod_time == $local_mod_time ) {
 					wp_cache_debug( 'wp_cache_serve_cache_file: Send 304 Not Modified header.' );
 					header( $_SERVER['SERVER_PROTOCOL'] . ' 304 Not Modified' );
+					if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+						turbo_cache_diagnostics_record(
+							'HIT_NOT_MODIFIED_304',
+							'Served 304 Not Modified conditional response',
+							array(
+								'etag'  => $etag,
+								'mtime' => (int) $file_mtime,
+							)
+						);
+					}
 					exit( 0 );
 				} else {
 					wp_cache_debug( 'wp_cache_serve_cache_file: 304 browser caching not possible as timestamps differ.' );
 				}
 				header( 'Last-Modified: ' . $local_mod_time );
+			}
+
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				$diag_outcome = $wp_cache_gzip_encoding ? 'HIT_SUPERCACHE_GZIP' : 'HIT_SUPERCACHE';
+				turbo_cache_diagnostics_record(
+					$diag_outcome,
+					'Served static cache file from PHP',
+					array(
+						'file'           => basename( $file ),
+						'content_length' => (int) $size,
+						'etag'           => $etag,
+						'mtime'          => (int) $file_mtime,
+					)
+				);
 			}
 
 			echo $cachefiledata;
@@ -441,6 +514,15 @@ function wp_cache_serve_cache_file() {
 	} else {
 		wp_cache_debug( 'Sending wp-cache file to browser: ' . $cache_file );
 		$cache = wp_cache_get_legacy_cache( $cache_file );
+	}
+	if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+		turbo_cache_diagnostics_record(
+			'HIT_WPCACHE',
+			'Served wp-cache file from PHP',
+			array(
+				'file' => basename( $cache_file ),
+			)
+		);
 	}
 	// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- this is the cached version of the current page. It will have been escaped already.
 	echo $cache;
@@ -2658,6 +2740,10 @@ function wp_cache_get_ob( &$buffer ) {
 	}
 
 	if ( ! $new_cache ) {
+		if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+			$skip_reason = empty( $buffer ) ? 'empty_buffer' : ( isset( $wp_super_cache_query['is_404'] ) ? '404_not_found' : 'missing_eof_tag' );
+			turbo_cache_diagnostics_record( 'GENERATION_SKIPPED', 'Cache generation skipped: ' . $skip_reason );
+		}
 		return wp_cache_maybe_dynamic( $buffer );
 	}
 
@@ -2904,12 +2990,21 @@ function wp_cache_get_ob( &$buffer ) {
 		} elseif ( @filesize( $tmp_cache_filename ) == 0 ) {
 			wp_cache_debug( "Warning! The file $tmp_cache_filename was empty. Did not rename to {$cache_fname}", 5 );
 			@unlink( $tmp_cache_filename );
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'GENERATION_FAILED', 'Output buffer generated empty temporary cache file', array( 'file' => basename( $cache_fname ) ) );
+			}
 		} else {
 			if ( ! turbo_cache_atomic_rename( $tmp_cache_filename, $cache_fname ) ) {
 				wp_cache_debug( "FAILED to rename temp supercache file to $cache_fname", 1 );
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record( 'GENERATION_FAILED', 'Failed to rename temp supercache file', array( 'file' => basename( $cache_fname ) ) );
+				}
 			} else {
 				wp_cache_debug( "Renamed temp supercache file to $cache_fname", 5 );
 				$added_cache = 1;
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record( 'GENERATION_SUCCESS', 'Generated supercache static file', array( 'file' => basename( $cache_fname ), 'size' => @filesize( $cache_fname ) ) );
+				}
 			}
 		}
 	}

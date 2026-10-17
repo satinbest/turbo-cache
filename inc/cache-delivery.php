@@ -267,6 +267,17 @@ function turbo_cache_send_conditional_304( $etag, $mtime, $exit = true ) {
 		wp_cache_debug( "turbo_cache_send_conditional_304: sent 304 Not Modified (ETag: $etag, Last-Modified: $last_mod)" );
 	}
 
+	if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+		turbo_cache_diagnostics_record(
+			'HIT_NOT_MODIFIED_304',
+			'Served 304 Not Modified conditional response',
+			array(
+				'etag'  => $etag,
+				'mtime' => (int) $mtime,
+			)
+		);
+	}
+
 	if ( $exit && ! defined( 'PHPUNIT_COMPOSER_INSTALL' ) && ! defined( 'WPSC_SMOKE_TEST' ) ) {
 		exit( 0 );
 	}
@@ -288,10 +299,10 @@ function turbo_cache_send_delivery_headers( $etag, $mtime, $content_length, $enc
 	$last_mod = gmdate( 'D, d M Y H:i:s', (int) $mtime ) . ' GMT';
 
 	$headers = array(
-		'ETag'          => $etag,
-		'Last-Modified' => $last_mod,
-		'Content-Length'=> (string) ( (int) $content_length ),
-		'X-Turbo-Cache' => 'HIT (' . $served_from . ')',
+		'ETag'           => $etag,
+		'Last-Modified'  => $last_mod,
+		'Content-Length' => (string) ( (int) $content_length ),
+		'X-Turbo-Cache'  => 'HIT (' . $served_from . ')',
 	);
 
 	if ( ! empty( $encoding ) ) {
@@ -306,6 +317,19 @@ function turbo_cache_send_delivery_headers( $etag, $mtime, $content_length, $enc
 		if ( ! empty( $encoding ) ) {
 			header( 'Content-Encoding: ' . $encoding );
 		}
+	}
+
+	if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+		$diag_outcome = ( false !== strpos( (string) $served_from, 'gzip' ) ) ? 'HIT_SUPERCACHE_GZIP' : 'HIT_SUPERCACHE';
+		turbo_cache_diagnostics_record(
+			$diag_outcome,
+			'Served cached file (' . $served_from . ')',
+			array(
+				'etag'           => $etag,
+				'mtime'          => (int) $mtime,
+				'content_length' => (int) $content_length,
+			)
+		);
 	}
 
 	return $headers;

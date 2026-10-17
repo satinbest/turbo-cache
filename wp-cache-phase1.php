@@ -7,6 +7,7 @@ require_once __DIR__ . '/inc/request-safety.php';
 require_once __DIR__ . '/inc/cache-storage.php';
 require_once __DIR__ . '/inc/cache-delivery.php';
 require_once __DIR__ . '/inc/cache-maintenance.php';
+require_once __DIR__ . '/inc/cache-diagnostics.php';
 
 // error_reporting(E_ERROR | E_PARSE); // uncomment to debug this file!
 // directory where the configuration file lives.
@@ -129,6 +130,12 @@ if ( false !== $turbo_bypass_reason ) {
 		define( 'DONOTCACHEPAGE', 1 );
 	}
 	wp_cache_debug( 'Caching disabled by early request rule: ' . $turbo_bypass_reason );
+	if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+		$diag_outcome = function_exists( 'turbo_cache_diagnostics_map_bypass_reason' )
+			? turbo_cache_diagnostics_map_bypass_reason( $turbo_bypass_reason )
+			: 'BYPASS_REQUEST_SAFETY';
+		turbo_cache_diagnostics_record( $diag_outcome, $turbo_bypass_reason );
+	}
 	return true;
 }
 

@@ -467,12 +467,13 @@ function turbo_cache_preload_get_state() {
 		'queue_cursor'         => 0,
 		'consecutive_failures' => 0,
 		'stats'                => array(
-			'total_discovered' => 0,
-			'processed'        => 0,
-			'cached'           => 0,
-			'skipped'          => 0,
-			'failed'           => 0,
-			'skip_reasons'     => array(),
+			'total_discovered'         => 0,
+			'processed'                => 0,
+			'http_requests_successful' => 0,
+			'cached'                   => 0,
+			'skipped'                  => 0,
+			'failed'                   => 0,
+			'skip_reasons'             => array(),
 		),
 		'failures'             => array(), // url => array( code, message, permanent, timestamp )
 		'last_error'           => null,
@@ -993,12 +994,13 @@ function turbo_cache_preload_process_batch( $batch_size = null ) {
 		$state['started_at']           = time();
 		$state['consecutive_failures'] = 0;
 		$state['stats']                = array(
-			'total_discovered' => count( $discovered ),
-			'processed'        => 0,
-			'cached'           => 0,
-			'skipped'          => 0,
-			'failed'           => 0,
-			'skip_reasons'     => array(),
+			'total_discovered'         => count( $discovered ),
+			'processed'                => 0,
+			'http_requests_successful' => 0,
+			'cached'                   => 0,
+			'skipped'                  => 0,
+			'failed'                   => 0,
+			'skip_reasons'             => array(),
 		);
 		$state['failures']             = array();
 		$state['last_error']           = null;
@@ -1047,6 +1049,16 @@ function turbo_cache_preload_process_batch( $batch_size = null ) {
 			++$state['stats']['skipped'];
 			$reason                                    = $safety['reason'];
 			$state['stats']['skip_reasons'][ $reason ] = isset( $state['stats']['skip_reasons'][ $reason ] ) ? $state['stats']['skip_reasons'][ $reason ] + 1 : 1;
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record(
+					'PRELOAD_SKIPPED',
+					'Preload skipped URL: ' . $reason,
+					array(
+						'url'    => $current_url,
+						'reason' => $reason,
+					)
+				);
+			}
 			++$state['queue_cursor'];
 			++$processed_in_batch;
 			continue;
@@ -1071,23 +1083,30 @@ function turbo_cache_preload_process_batch( $batch_size = null ) {
 		++$state['stats']['processed'];
 
 		if ( $fetch_result['success'] ) {
-			// Verify that cache entry was actually generated on disk if in WordPress runtime.
-			$cache_verified = true;
-			if ( function_exists( 'wpsc_supercache_dir_for_url' ) && function_exists( 'get_option' ) ) {
-				$cache_verified = turbo_cache_preload_verify_cache_entry( $current_url );
-			}
+			$state['stats']['http_requests_successful'] = isset( $state['stats']['http_requests_successful'] ) ? $state['stats']['http_requests_successful'] + 1 : 1;
+			// Verify that cache entry was actually generated on disk. An HTTP 200 alone never counts as cached.
+			$cache_verified = turbo_cache_preload_verify_cache_entry( $current_url );
 
 			if ( $cache_verified ) {
 				++$state['stats']['cached'];
 				$state['consecutive_failures'] = 0;
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record( 'PRELOAD_CACHED', 'Preload warmed and verified cache on disk', array( 'url' => $current_url ) );
+				}
 			} else {
 				++$state['stats']['skipped'];
 				$state['stats']['skip_reasons']['not_cached'] = isset( $state['stats']['skip_reasons']['not_cached'] ) ? $state['stats']['skip_reasons']['not_cached'] + 1 : 1;
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record( 'PRELOAD_NOT_CACHED', 'Preload HTTP request succeeded (200) but cache file was not created on disk', array( 'url' => $current_url ) );
+				}
 			}
 		} elseif ( $fetch_result['redirect'] ) {
 			++$state['stats']['skipped'];
 			$redirect_reason                                    = ( isset( $fetch_result['target_safe'] ) && ! $fetch_result['target_safe'] ) ? 'unsafe_redirect_target' : 'redirect';
 			$state['stats']['skip_reasons'][ $redirect_reason ] = isset( $state['stats']['skip_reasons'][ $redirect_reason ] ) ? $state['stats']['skip_reasons'][ $redirect_reason ] + 1 : 1;
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record( 'PRELOAD_SKIPPED', 'Preload skipped redirect: ' . $redirect_reason, array( 'url' => $current_url ) );
+			}
 			if ( ! empty( $fetch_result['permanent_error'] ) ) {
 				$state['failures'][ $current_url ] = array(
 					'code'      => $fetch_result['code'],
@@ -1106,6 +1125,16 @@ function turbo_cache_preload_process_batch( $batch_size = null ) {
 				'timestamp' => time(),
 			);
 			$state['last_error']               = $fetch_result['error'];
+			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+				turbo_cache_diagnostics_record(
+					'PRELOAD_FAILED',
+					'Preload request failed: ' . $fetch_result['error'],
+					array(
+						'url'  => $current_url,
+						'code' => $fetch_result['code'],
+					)
+				);
+			}
 
 			if ( $state['consecutive_failures'] >= 5 ) {
 				$state['status']     = 'paused';
