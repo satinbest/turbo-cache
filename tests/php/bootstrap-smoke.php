@@ -559,16 +559,40 @@ if ( ! function_exists( 'add_submenu_page' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wp_schedule_single_event' ) ) {
+	function wp_schedule_single_event( $timestamp, $hook, $args = array() ) {
+		if ( ! isset( $GLOBALS['wpsc_test_scheduled_events'] ) ) {
+			$GLOBALS['wpsc_test_scheduled_events'] = array();
+		}
+		$GLOBALS['wpsc_test_scheduled_events'][ $hook ][] = array(
+			'timestamp' => $timestamp,
+			'args'      => $args,
+		);
+		return true;
+	}
+}
+
 if ( ! function_exists( 'wp_next_scheduled' ) ) {
 	function wp_next_scheduled( $hook, $args = array() ) {
-		unset( $hook, $args );
+		unset( $args );
+		if ( isset( $GLOBALS['wpsc_test_scheduled_events'][ $hook ] ) && ! empty( $GLOBALS['wpsc_test_scheduled_events'][ $hook ] ) ) {
+			return $GLOBALS['wpsc_test_scheduled_events'][ $hook ][0]['timestamp'];
+		}
 		return false;
 	}
 }
 
 if ( ! function_exists( 'wp_unschedule_event' ) ) {
 	function wp_unschedule_event( $timestamp, $hook, $args = array() ) {
-		unset( $timestamp, $hook, $args );
+		unset( $args );
+		if ( isset( $GLOBALS['wpsc_test_scheduled_events'][ $hook ] ) ) {
+			foreach ( $GLOBALS['wpsc_test_scheduled_events'][ $hook ] as $idx => $event ) {
+				if ( $event['timestamp'] === $timestamp ) {
+					unset( $GLOBALS['wpsc_test_scheduled_events'][ $hook ][ $idx ] );
+				}
+			}
+			$GLOBALS['wpsc_test_scheduled_events'][ $hook ] = array_values( $GLOBALS['wpsc_test_scheduled_events'][ $hook ] );
+		}
 		return true;
 	}
 }

@@ -283,6 +283,19 @@ function wp_cron_preload_cache() {
 			}
 			wpsc_update_idle_preload( time() );
 			return true;
+		} elseif ( 'locked' === $batch_res['status'] ) {
+			// Lock collision: another worker currently holds the preload lock.
+			// Do not treat as completed or terminate the cron chain.
+			// Only schedule a delayed retry if preload is still actively running and not cancelled/paused,
+			// and no retry event is already scheduled.
+			$state     = turbo_cache_preload_get_state();
+			$stop_flag = ( isset( $cache_path ) ? $cache_path : '' ) . 'stop_preload.txt';
+			if ( ! file_exists( $stop_flag ) && 'running' === $state['status'] ) {
+				if ( ! wp_next_scheduled( 'wp_cache_preload_hook' ) ) {
+					wp_schedule_single_event( time() + 15, 'wp_cache_preload_hook' );
+				}
+			}
+			return true;
 		} else {
 			return true;
 		}
