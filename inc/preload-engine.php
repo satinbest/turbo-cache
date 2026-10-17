@@ -503,6 +503,68 @@ function turbo_cache_preload_get_state() {
 }
 
 /**
+ * Execute a callback within an exclusive coordination critical section.
+ *
+ * Uses a persistent coordination mutex file (`preload_coord.lock`) and PHP flock(LOCK_EX)
+ * to serialize short metadata operations (lock acquisition, stale-lock recovery,
+ * token verification, state generation validation, state commit, and reset transitions).
+ *
+ * This eliminates multi-process TOCTOU races. Network requests and batch URL processing
+ * happen strictly outside this critical section.
+ *
+ * @param callable $callback Operation to execute under exclusive coordination.
+ * @return mixed Result of callback execution.
+ */
+function turbo_cache_preload_with_coordination( $callback ) {
+	global $cache_path;
+	static $lock_depth = 0;
+	static $coord_fp   = null;
+
+	if ( $lock_depth > 0 && is_resource( $coord_fp ) ) {
+		// Re-entrant lock in same process: already holding coordination mutex.
+		++$lock_depth;
+		try {
+			return call_user_func( $callback );
+		} finally {
+			--$lock_depth;
+		}
+	}
+
+	$mutex_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_coord.lock';
+
+	$dir = dirname( $mutex_file );
+	if ( ! is_dir( $dir ) && function_exists( 'wp_mkdir_p' ) ) {
+		wp_mkdir_p( $dir );
+	}
+
+	$fp = @fopen( $mutex_file, 'c+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	if ( false === $fp ) {
+		// Fallback if filesystem permissions prevent opening the coordination file.
+		return call_user_func( $callback );
+	}
+
+	$locked = @flock( $fp, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	if ( ! $locked ) {
+		@fclose( $fp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		return call_user_func( $callback );
+	}
+
+	$coord_fp   = $fp;
+	$lock_depth = 1;
+
+	try {
+		return call_user_func( $callback );
+	} finally {
+		--$lock_depth;
+		if ( 0 === $lock_depth ) {
+			$coord_fp = null;
+			@flock( $fp, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			@fclose( $fp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+	}
+}
+
+/**
  * Read the current ownership token from the lock file, if any.
  *
  * @return string|null Lock token string if locked, empty string if legacy lock, or null if unlocked.
@@ -529,6 +591,7 @@ function turbo_cache_preload_get_lock_token() {
  *
  * Validates lock ownership and state generation if provided, preventing stale
  * in-memory workers from overwriting newer resets or active worker states.
+ * All checks and file replacement are serialized under the coordination mutex.
  *
  * @param array       $state               Preload state array.
  * @param string|null $expected_generation Optional generation ID expected on disk.
@@ -541,206 +604,246 @@ function turbo_cache_preload_save_state( $state, $expected_generation = null, $w
 		return false;
 	}
 
-	$filename = turbo_cache_preload_get_state_file_path();
+	return (bool) turbo_cache_preload_with_coordination(
+		function () use ( $state, $expected_generation, $worker_token, $force ) {
+			$filename = turbo_cache_preload_get_state_file_path();
 
-	if ( ! $force ) {
-		// 1. Worker token validation: if worker token passed, ensure worker still owns lock.
-		if ( null !== $worker_token && '' !== $worker_token ) {
-			$current_lock = turbo_cache_preload_get_lock_token();
-			if ( $current_lock !== $worker_token ) {
-				return false;
-			}
-		}
+			if ( ! $force ) {
+				// 1. Worker token validation: if worker token passed, ensure worker still owns lock.
+				if ( null !== $worker_token && '' !== $worker_token ) {
+					$current_lock = turbo_cache_preload_get_lock_token();
+					if ( $current_lock !== $worker_token ) {
+						return false;
+					}
+				}
 
-		// 2. Generation validation: if expected generation passed, ensure disk matches.
-		if ( null === $expected_generation && isset( $state['generation'] ) && 'gen_0' !== $state['generation'] ) {
-			$expected_generation = $state['generation'];
-		}
+				// 2. Generation validation: if expected generation passed, ensure disk matches.
+				if ( null === $expected_generation && isset( $state['generation'] ) && 'gen_0' !== $state['generation'] ) {
+					$expected_generation = $state['generation'];
+				}
 
-		if ( null !== $expected_generation && '' !== $expected_generation && 'gen_0' !== $expected_generation ) {
-			if ( file_exists( $filename ) ) {
-				$disk_content = @file_get_contents( $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-				if ( false !== $disk_content && '' !== trim( $disk_content ) ) {
-					$disk_state = json_decode( $disk_content, true );
-					if ( is_array( $disk_state ) ) {
-						$disk_gen = isset( $disk_state['generation'] ) ? $disk_state['generation'] : '';
-						if ( '' !== $disk_gen && 'gen_0' !== $disk_gen && $disk_gen !== $expected_generation ) {
-							// Disk state has been superseded by a newer worker or reset.
-							return false;
+				if ( null !== $expected_generation && '' !== $expected_generation && 'gen_0' !== $expected_generation ) {
+					if ( file_exists( $filename ) ) {
+						$disk_content = @file_get_contents( $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+						if ( false !== $disk_content && '' !== trim( $disk_content ) ) {
+							$disk_state = json_decode( $disk_content, true );
+							if ( is_array( $disk_state ) ) {
+								$disk_gen = isset( $disk_state['generation'] ) ? $disk_state['generation'] : '';
+								if ( '' !== $disk_gen && 'gen_0' !== $disk_gen && $disk_gen !== $expected_generation ) {
+									// Disk state has been superseded by a newer worker or reset.
+									return false;
+								}
+							}
 						}
 					}
 				}
 			}
+
+			$state['updated_at'] = time();
+
+			$dir = dirname( $filename );
+			if ( ! is_dir( $dir ) && function_exists( 'wp_mkdir_p' ) ) {
+				wp_mkdir_p( $dir );
+			}
+
+			$json = turbo_cache_json_encode( $state, JSON_UNESCAPED_SLASHES );
+			if ( false === $json ) {
+				return false;
+			}
+
+			// Atomic write: write to unique temporary file then rename under coordination mutex.
+			$temp_file = $filename . '.' . uniqid( 'tc_tmp_', true );
+			$written   = @file_put_contents( $temp_file, $json ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( false === $written ) {
+				return false;
+			}
+
+			// On Windows, unlink destination first if rename cannot overwrite.
+			if ( file_exists( $filename ) && strtoupper( substr( PHP_OS, 0, 3 ) ) === 'WIN' ) {
+				@unlink( $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			}
+			$renamed = @rename( $temp_file, $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( ! $renamed ) {
+				$copied = @copy( $temp_file, $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				@unlink( $temp_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				if ( ! $copied ) {
+					return false;
+				}
+			}
+
+			if ( function_exists( 'update_option' ) ) {
+				// Store compact state in options table as persistent fallback (omit huge queue).
+				$compact_state          = $state;
+				$compact_state['queue'] = array();
+				update_option( 'turbo_cache_preload_state', $compact_state, false );
+			}
+
+			return true;
 		}
-	}
-
-	$state['updated_at'] = time();
-
-	$dir = dirname( $filename );
-	if ( ! is_dir( $dir ) && function_exists( 'wp_mkdir_p' ) ) {
-		wp_mkdir_p( $dir );
-	}
-
-	$json = turbo_cache_json_encode( $state, JSON_UNESCAPED_SLASHES );
-	if ( false === $json ) {
-		return false;
-	}
-
-	// Atomic write: write to unique temporary file then rename.
-	$temp_file = $filename . '.' . uniqid( 'tc_tmp_', true );
-	$written   = file_put_contents( $temp_file, $json );
-	if ( false !== $written ) {
-		// On Windows, unlink destination first if rename cannot overwrite.
-		if ( file_exists( $filename ) && strtoupper( substr( PHP_OS, 0, 3 ) ) === 'WIN' ) {
-			@unlink( $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		}
-		$renamed = @rename( $temp_file, $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		if ( ! $renamed ) {
-			@copy( $temp_file, $filename ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-			@unlink( $temp_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		}
-	}
-
-	if ( function_exists( 'update_option' ) ) {
-		// Store compact state in options table as persistent fallback (omit huge queue).
-		$compact_state          = $state;
-		$compact_state['queue'] = array();
-		update_option( 'turbo_cache_preload_state', $compact_state, false );
-	}
-
-	return false !== $written;
+	);
 }
 
 /**
  * Acquire lock for preload batch processing.
  *
- * Atomically acquires the worker lock file. If the existing lock is stale
- * (older than 600s), safely recovers the lock without racing with newly
- * acquired locks. Returns true on success with unique ownership token,
- * or false if already locked.
+ * Atomically acquires the worker lock file under the coordination mutex.
+ * If the existing lock is stale (older than 600s), safely recovers the lock
+ * without racing with newly acquired locks. Returns true on success with unique
+ * ownership token, or false if already locked.
  *
  * @param string|null &$token Optional variable to receive the unique lock token.
  * @return bool True if lock acquired, false if already locked.
  */
 function turbo_cache_preload_acquire_lock( &$token = null ) {
-	global $cache_path;
-	$lock_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
+	$acquired_token = null;
 
-	$token = null;
+	$result = turbo_cache_preload_with_coordination(
+		function () use ( &$acquired_token ) {
+			global $cache_path;
+			$lock_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
 
-	if ( file_exists( $lock_file ) ) {
-		$mtime = filemtime( $lock_file );
-		if ( $mtime && ( time() - $mtime ) < 600 ) {
-			return false;
-		}
+			if ( file_exists( $lock_file ) ) {
+				$mtime = @filemtime( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				if ( $mtime && ( time() - $mtime ) < 600 ) {
+					return false;
+				}
 
-		// Stale-lock recovery: atomically rename before unlinking so we never delete
-		// a freshly acquired lock from a concurrent worker.
-		$stale_target = $lock_file . '.stale.' . uniqid( '', true );
-		if ( @rename( $lock_file, $stale_target ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-			@unlink( $stale_target ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		} elseif ( file_exists( $lock_file ) ) {
-			// Another process already renamed/handled the stale lock or created a new one.
-			$fresh_mtime = filemtime( $lock_file );
-			if ( $fresh_mtime && ( time() - $fresh_mtime ) < 600 ) {
-				return false;
+				// Stale lock recovery: safely unlink under coordination mutex.
+				@unlink( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 			}
+
+			$fp = @fopen( $lock_file, 'x' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( false === $fp ) {
+				$fp = @fopen( $lock_file, 'w' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				if ( false === $fp ) {
+					return false;
+				}
+			}
+
+			$unique_token = 'worker_' . uniqid( '', true ) . '.' . mt_rand( 1000, 9999 );
+			$payload      = turbo_cache_json_encode(
+				array(
+					'token' => $unique_token,
+					'time'  => time(),
+				)
+			);
+
+			fwrite( $fp, false !== $payload ? $payload : (string) time() );
+			fflush( $fp );
+			fclose( $fp );
+
+			$acquired_token = $unique_token;
+			return true;
 		}
-	}
-
-	$fp = @fopen( $lock_file, 'x' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	if ( false === $fp ) {
-		return false;
-	}
-
-	$unique_token = 'worker_' . uniqid( '', true ) . '.' . mt_rand( 1000, 9999 );
-	$payload      = turbo_cache_json_encode(
-		array(
-			'token' => $unique_token,
-			'time'  => time(),
-		)
 	);
 
-	fwrite( $fp, false !== $payload ? $payload : (string) time() );
-	fclose( $fp );
+	if ( $result ) {
+		$token = $acquired_token;
+		return true;
+	}
 
-	$token = $unique_token;
-	return true;
+	$token = null;
+	return false;
 }
 
 /**
  * Release lock for preload batch processing.
  *
  * If a token is provided, verifies that the current lock is owned by this token
- * before deleting the lock file. If the token does not match, the lock is preserved.
- * If token is null, releases unconditionally (used by system resets and cleanup).
+ * before deleting the lock file. If the token does not match or the lock content
+ * is empty/unreadable, the lock is preserved. Verification and removal execute
+ * atomically under the coordination mutex.
  *
  * @param string|null $token Optional ownership token.
  * @return bool True if released, false if ownership check failed.
  */
 function turbo_cache_preload_release_lock( $token = null ) {
-	global $cache_path;
-	$lock_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
-	if ( ! file_exists( $lock_file ) ) {
-		return true;
-	}
-
-	if ( null !== $token && '' !== $token ) {
-		$content = @file_get_contents( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		if ( false !== $content && '' !== trim( $content ) ) {
-			$data           = json_decode( $content, true );
-			$existing_token = ( is_array( $data ) && ! empty( $data['token'] ) ) ? $data['token'] : '';
-			if ( $existing_token !== $token ) {
-				// Token mismatch: lock belongs to another worker.
-				return false;
+	return (bool) turbo_cache_preload_with_coordination(
+		function () use ( $token ) {
+			global $cache_path;
+			$lock_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
+			if ( ! file_exists( $lock_file ) ) {
+				return true;
 			}
-		}
-	}
 
-	@unlink( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	return true;
+			if ( null !== $token && '' !== $token ) {
+				$content = @file_get_contents( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				// If lock content is empty or unreadable, an ownership-verified release must NOT delete it.
+				if ( false === $content || '' === trim( $content ) ) {
+					return false;
+				}
+
+				$data           = json_decode( $content, true );
+				$existing_token = ( is_array( $data ) && ! empty( $data['token'] ) ) ? $data['token'] : '';
+				if ( $existing_token !== $token ) {
+					// Token mismatch: lock belongs to another worker.
+					return false;
+				}
+			}
+
+			@unlink( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			return true;
+		}
+	);
 }
 
 /**
  * Reset Turbo Cache preload state.
  *
- * Updates preload state to a clean idle state with a new generation ID,
- * invalidating any in-flight workers so their subsequent state commits cannot
- * resurrect the pre-reset queue.
+ * Updates preload state to a clean idle state with a new generation ID under
+ * the coordination mutex, invalidating any in-flight workers. Preserves a valid
+ * active worker lock so no new worker can start while the old worker is finishing,
+ * while removing any stale (> 600s) lock.
  *
  * @return void
  */
 function turbo_cache_preload_reset_state() {
-	$new_generation = 'gen_' . microtime( true ) . '_' . mt_rand( 1000, 9999 );
+	turbo_cache_preload_with_coordination(
+		function () {
+			global $cache_path;
+			$new_generation = 'gen_' . microtime( true ) . '_' . mt_rand( 1000, 9999 );
 
-	$reset_state = array(
-		'status'               => 'idle',
-		'generation'           => $new_generation,
-		'started_at'           => 0,
-		'updated_at'           => time(),
-		'finished_at'          => 0,
-		'queue'                => array(),
-		'queue_cursor'         => 0,
-		'consecutive_failures' => 0,
-		'stats'                => array(
-			'total_discovered'         => 0,
-			'processed'                => 0,
-			'http_requests_successful' => 0,
-			'cached'                   => 0,
-			'skipped'                  => 0,
-			'failed'                   => 0,
-			'skip_reasons'             => array(),
-		),
-		'failures'             => array(),
-		'last_error'           => null,
+			$reset_state = array(
+				'status'               => 'idle',
+				'generation'           => $new_generation,
+				'started_at'           => 0,
+				'updated_at'           => time(),
+				'finished_at'          => 0,
+				'queue'                => array(),
+				'queue_cursor'         => 0,
+				'consecutive_failures' => 0,
+				'stats'                => array(
+					'total_discovered'         => 0,
+					'processed'                => 0,
+					'http_requests_successful' => 0,
+					'cached'                   => 0,
+					'skipped'                  => 0,
+					'failed'                   => 0,
+					'skip_reasons'             => array(),
+				),
+				'failures'             => array(),
+				'last_error'           => null,
+			);
+
+			// Commit clean idle state with new generation under coordination mutex.
+			turbo_cache_preload_save_state( $reset_state, null, null, true );
+
+			// Check lock file: if stale (> 600s), remove it.
+			// If lock is held by a valid active worker, DO NOT unlink it.
+			// The active worker will observe the generation change, abort, and release its own lock.
+			$lock_file = ( isset( $cache_path ) && '' !== $cache_path ? $cache_path : sys_get_temp_dir() . '/' ) . 'preload_batch.lock';
+			if ( file_exists( $lock_file ) ) {
+				$mtime = @filemtime( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				if ( ! $mtime || ( time() - $mtime ) >= 600 ) {
+					@unlink( $lock_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+				}
+			}
+
+			if ( function_exists( 'delete_option' ) ) {
+				delete_option( 'turbo_cache_preload_state' );
+			}
+		}
 	);
-
-	turbo_cache_preload_save_state( $reset_state, null, null, true );
-	turbo_cache_preload_release_lock();
-
-	if ( function_exists( 'delete_option' ) ) {
-		delete_option( 'turbo_cache_preload_state' );
-	}
 }
 
 /**
@@ -1081,7 +1184,8 @@ function turbo_cache_preload_verify_cache_entry( $url ) {
 function turbo_cache_preload_process_batch( $batch_size = null ) {
 	global $cache_path;
 
-	$worker_token = null;
+	$worker_token  = null;
+	$lock_released = false;
 	if ( ! turbo_cache_preload_acquire_lock( $worker_token ) ) {
 		return array(
 			'status'  => 'locked',
@@ -1089,293 +1193,312 @@ function turbo_cache_preload_process_batch( $batch_size = null ) {
 		);
 	}
 
-	if ( null === $batch_size ) {
-		$batch_size = defined( 'WPSC_PRELOAD_POST_COUNT' ) ? (int) WPSC_PRELOAD_POST_COUNT : 10;
-	}
-	$batch_size = (int) apply_filters( 'turbo_cache_preload_batch_size', max( 1, min( 50, $batch_size ) ) );
-
-	$state = turbo_cache_preload_get_state();
-
-	// Initialize worker generation ID if missing.
-	if ( empty( $state['generation'] ) || 'gen_0' === $state['generation'] ) {
-		$state['generation'] = 'gen_' . microtime( true ) . '_' . mt_rand( 1000, 9999 );
-	}
-	$worker_generation = $state['generation'];
-
-	// Check cancellation.
-	$stop_flag = ( isset( $cache_path ) ? $cache_path : '' ) . 'stop_preload.txt';
-	if ( file_exists( $stop_flag ) || 'cancelled' === $state['status'] ) {
-		$state['status'] = 'cancelled';
-		turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
-		if ( function_exists( 'wpsc_update_idle_preload' ) ) {
-			wpsc_update_idle_preload( time() );
+	try {
+		if ( null === $batch_size ) {
+			$batch_size = defined( 'WPSC_PRELOAD_POST_COUNT' ) ? (int) WPSC_PRELOAD_POST_COUNT : 10;
 		}
-		turbo_cache_preload_release_lock( $worker_token );
-		return array(
-			'status'  => 'cancelled',
-			'message' => 'Preload cancelled by user flag.',
-		);
-	}
+		$batch_size = (int) apply_filters( 'turbo_cache_preload_batch_size', max( 1, min( 50, $batch_size ) ) );
 
-	// Circuit breaker check: consecutive failures >= 5.
-	if ( isset( $state['consecutive_failures'] ) && $state['consecutive_failures'] >= 5 ) {
-		$state['status']     = 'paused';
-		$state['last_error'] = 'Circuit breaker triggered: 5 consecutive request failures.';
-		turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
-		turbo_cache_preload_release_lock( $worker_token );
-		return array(
-			'status'  => 'paused',
-			'message' => $state['last_error'],
-		);
-	}
+		$state = turbo_cache_preload_get_state();
 
-	// Initialize discovery if queue is empty or starting fresh.
-	if ( empty( $state['queue'] ) || 'idle' === $state['status'] ) {
-		$discovered                    = turbo_cache_preload_discover_urls();
-		$state['queue']                = $discovered;
-		$state['queue_cursor']         = 0;
-		$state['status']               = 'running';
-		$state['started_at']           = time();
-		$state['consecutive_failures'] = 0;
-		$state['stats']                = array(
-			'total_discovered'         => count( $discovered ),
-			'processed'                => 0,
-			'http_requests_successful' => 0,
-			'cached'                   => 0,
-			'skipped'                  => 0,
-			'failed'                   => 0,
-			'skip_reasons'             => array(),
-		);
-		$state['failures']             = array();
-		$state['last_error']           = null;
-		$saved                         = turbo_cache_preload_save_state( $state, null, $worker_token );
-		if ( ! $saved ) {
-			turbo_cache_preload_release_lock( $worker_token );
-			return array(
-				'status'  => 'superseded',
-				'message' => 'Preload batch superseded before discovery commit.',
-			);
+		// Initialize worker generation ID if missing.
+		if ( empty( $state['generation'] ) || 'gen_0' === $state['generation'] ) {
+			$state['generation'] = 'gen_' . microtime( true ) . '_' . mt_rand( 1000, 9999 );
 		}
-	}
+		$worker_generation = $state['generation'];
 
-	$total_urls = count( $state['queue'] );
-	if ( $total_urls === 0 || $state['queue_cursor'] >= $total_urls ) {
-		$state['status']      = 'completed';
-		$state['finished_at'] = time();
-		turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
-		if ( function_exists( 'wpsc_update_idle_preload' ) ) {
-			wpsc_update_idle_preload( time() );
-		}
-		turbo_cache_preload_release_lock( $worker_token );
-		return array(
-			'status'  => 'completed',
-			'message' => 'All queued URLs have been processed.',
-			'stats'   => $state['stats'],
-		);
-	}
-
-	$start_time         = time();
-	$processed_in_batch = 0;
-
-	while ( $state['queue_cursor'] < $total_urls && $processed_in_batch < $batch_size ) {
-		// Responsive cancellation check before every URL request.
-		if ( file_exists( $stop_flag ) ) {
+		// Check cancellation.
+		$stop_flag = ( isset( $cache_path ) ? $cache_path : '' ) . 'stop_preload.txt';
+		if ( file_exists( $stop_flag ) || 'cancelled' === $state['status'] ) {
 			$state['status'] = 'cancelled';
 			turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
 			if ( function_exists( 'wpsc_update_idle_preload' ) ) {
 				wpsc_update_idle_preload( time() );
 			}
+			$lock_released = true;
 			turbo_cache_preload_release_lock( $worker_token );
 			return array(
-				'status'             => 'cancelled',
-				'processed_in_batch' => $processed_in_batch,
-				'queue_cursor'       => $state['queue_cursor'],
-				'total_urls'         => $total_urls,
-				'stats'              => $state['stats'],
-				'message'            => 'Preload cancelled by user flag.',
+				'status'  => 'cancelled',
+				'message' => 'Preload cancelled by user flag.',
 			);
 		}
 
-		// Revalidate ownership and generation before every URL request.
-		$current_lock = turbo_cache_preload_get_lock_token();
-		if ( $current_lock !== $worker_token ) {
-			return array(
-				'status'             => 'superseded',
-				'processed_in_batch' => $processed_in_batch,
-				'queue_cursor'       => $state['queue_cursor'],
-				'total_urls'         => $total_urls,
-				'stats'              => $state['stats'],
-				'message'            => 'Preload batch superseded: lock ownership lost.',
-			);
-		}
-
-		$disk_check = turbo_cache_preload_get_state();
-		if ( isset( $disk_check['generation'] ) && '' !== $disk_check['generation'] && 'gen_0' !== $disk_check['generation'] && $disk_check['generation'] !== $worker_generation ) {
+		// Circuit breaker check: consecutive failures >= 5.
+		if ( isset( $state['consecutive_failures'] ) && $state['consecutive_failures'] >= 5 ) {
+			$state['status']     = 'paused';
+			$state['last_error'] = 'Circuit breaker triggered: 5 consecutive request failures.';
+			turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
+			$lock_released = true;
 			turbo_cache_preload_release_lock( $worker_token );
 			return array(
-				'status'             => 'superseded',
-				'processed_in_batch' => $processed_in_batch,
-				'queue_cursor'       => $state['queue_cursor'],
-				'total_urls'         => $total_urls,
-				'stats'              => $state['stats'],
-				'message'            => 'Preload batch superseded: state generation mismatch.',
+				'status'  => 'paused',
+				'message' => $state['last_error'],
 			);
 		}
 
-		// Time and memory bounds check.
-		if ( ( time() - $start_time ) >= 20 ) {
-			break; // Yield slice.
-		}
-
-		$current_url = $state['queue'][ $state['queue_cursor'] ];
-
-		// Check if URL is marked as permanent failure.
-		if ( isset( $state['failures'][ $current_url ] ) && ! empty( $state['failures'][ $current_url ]['permanent'] ) ) {
-			++$state['stats']['skipped'];
-			$state['stats']['skip_reasons']['permanent_failure'] = isset( $state['stats']['skip_reasons']['permanent_failure'] ) ? $state['stats']['skip_reasons']['permanent_failure'] + 1 : 1;
-			++$state['queue_cursor'];
-			++$processed_in_batch;
-			continue;
-		}
-
-		// Validate URL safety.
-		$safety = turbo_cache_preload_is_safe_url( $current_url );
-		if ( ! $safety['eligible'] ) {
-			++$state['stats']['skipped'];
-			$reason                                    = $safety['reason'];
-			$state['stats']['skip_reasons'][ $reason ] = isset( $state['stats']['skip_reasons'][ $reason ] ) ? $state['stats']['skip_reasons'][ $reason ] + 1 : 1;
-			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
-				turbo_cache_diagnostics_record(
-					'PRELOAD_SKIPPED',
-					'Preload skipped URL: ' . $reason,
-					array(
-						'url'    => $current_url,
-						'reason' => $reason,
-					)
+		// Initialize discovery if queue is empty or starting fresh.
+		if ( empty( $state['queue'] ) || 'idle' === $state['status'] ) {
+			$discovered                    = turbo_cache_preload_discover_urls();
+			$state['queue']                = $discovered;
+			$state['queue_cursor']         = 0;
+			$state['status']               = 'running';
+			$state['started_at']           = time();
+			$state['consecutive_failures'] = 0;
+			$state['stats']                = array(
+				'total_discovered'         => count( $discovered ),
+				'processed'                => 0,
+				'http_requests_successful' => 0,
+				'cached'                   => 0,
+				'skipped'                  => 0,
+				'failed'                   => 0,
+				'skip_reasons'             => array(),
+			);
+			$state['failures']             = array();
+			$state['last_error']           = null;
+			$saved                         = turbo_cache_preload_save_state( $state, null, $worker_token );
+			if ( ! $saved ) {
+				$lock_released = true;
+				turbo_cache_preload_release_lock( $worker_token );
+				return array(
+					'status'  => 'superseded',
+					'message' => 'Preload batch superseded before discovery commit.',
 				);
 			}
-			++$state['queue_cursor'];
-			++$processed_in_batch;
-			continue;
 		}
 
-		// Update UI active progress if upstream helper exists.
-		if ( function_exists( 'wpsc_update_active_preload' ) ) {
-			wpsc_update_active_preload( 'queue', $state['queue_cursor'] + 1, $current_url );
-		}
-
-		// Clear existing cache for URL before warming.
-		if ( function_exists( 'wpsc_delete_files' ) ) {
-			$candidate_dirs = turbo_cache_preload_get_cache_dirs_for_url( $current_url );
-			foreach ( $candidate_dirs as $cache_dir ) {
-				wpsc_delete_files( $cache_dir );
+		$total_urls = count( $state['queue'] );
+		if ( $total_urls === 0 || $state['queue_cursor'] >= $total_urls ) {
+			$state['status']      = 'completed';
+			$state['finished_at'] = time();
+			turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
+			if ( function_exists( 'wpsc_update_idle_preload' ) ) {
+				wpsc_update_idle_preload( time() );
 			}
+			$lock_released = true;
+			turbo_cache_preload_release_lock( $worker_token );
+			return array(
+				'status'  => 'completed',
+				'message' => 'All queued URLs have been processed.',
+				'stats'   => $state['stats'],
+			);
 		}
 
-		// Dispatch request.
-		$fetch_result = turbo_cache_preload_fetch_url( $current_url );
+		$start_time         = time();
+		$processed_in_batch = 0;
 
-		++$state['stats']['processed'];
+		while ( $state['queue_cursor'] < $total_urls && $processed_in_batch < $batch_size ) {
+			// Responsive cancellation check before every URL request.
+			if ( file_exists( $stop_flag ) ) {
+				$state['status'] = 'cancelled';
+				turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
+				if ( function_exists( 'wpsc_update_idle_preload' ) ) {
+					wpsc_update_idle_preload( time() );
+				}
+				$lock_released = true;
+				turbo_cache_preload_release_lock( $worker_token );
+				return array(
+					'status'             => 'cancelled',
+					'processed_in_batch' => $processed_in_batch,
+					'queue_cursor'       => $state['queue_cursor'],
+					'total_urls'         => $total_urls,
+					'stats'              => $state['stats'],
+					'message'            => 'Preload cancelled by user flag.',
+				);
+			}
 
-		if ( $fetch_result['success'] ) {
-			$state['stats']['http_requests_successful'] = isset( $state['stats']['http_requests_successful'] ) ? $state['stats']['http_requests_successful'] + 1 : 1;
-			// Verify that cache entry was actually generated on disk. An HTTP 200 alone never counts as cached.
-			$cache_verified = turbo_cache_preload_verify_cache_entry( $current_url );
+			// Revalidate ownership and generation before every URL request.
+			$current_lock = turbo_cache_preload_get_lock_token();
+			if ( $current_lock !== $worker_token ) {
+				$lock_released = true;
+				return array(
+					'status'             => 'superseded',
+					'processed_in_batch' => $processed_in_batch,
+					'queue_cursor'       => $state['queue_cursor'],
+					'total_urls'         => $total_urls,
+					'stats'              => $state['stats'],
+					'message'            => 'Preload batch superseded: lock ownership lost.',
+				);
+			}
 
-			if ( $cache_verified ) {
-				++$state['stats']['cached'];
-				$state['consecutive_failures'] = 0;
+			$disk_check = turbo_cache_preload_get_state();
+			if ( isset( $disk_check['generation'] ) && '' !== $disk_check['generation'] && 'gen_0' !== $disk_check['generation'] && $disk_check['generation'] !== $worker_generation ) {
+				$lock_released = true;
+				turbo_cache_preload_release_lock( $worker_token );
+				return array(
+					'status'             => 'superseded',
+					'processed_in_batch' => $processed_in_batch,
+					'queue_cursor'       => $state['queue_cursor'],
+					'total_urls'         => $total_urls,
+					'stats'              => $state['stats'],
+					'message'            => 'Preload batch superseded: state generation mismatch.',
+				);
+			}
+
+			// Time and memory bounds check.
+			if ( ( time() - $start_time ) >= 20 ) {
+				break; // Yield slice.
+			}
+
+			$current_url = $state['queue'][ $state['queue_cursor'] ];
+
+			// Check if URL is marked as permanent failure.
+			if ( isset( $state['failures'][ $current_url ] ) && ! empty( $state['failures'][ $current_url ]['permanent'] ) ) {
+				++$state['stats']['skipped'];
+				$state['stats']['skip_reasons']['permanent_failure'] = isset( $state['stats']['skip_reasons']['permanent_failure'] ) ? $state['stats']['skip_reasons']['permanent_failure'] + 1 : 1;
+				++$state['queue_cursor'];
+				++$processed_in_batch;
+				continue;
+			}
+
+			// Validate URL safety.
+			$safety = turbo_cache_preload_is_safe_url( $current_url );
+			if ( ! $safety['eligible'] ) {
+				++$state['stats']['skipped'];
+				$reason                                    = $safety['reason'];
+				$state['stats']['skip_reasons'][ $reason ] = isset( $state['stats']['skip_reasons'][ $reason ] ) ? $state['stats']['skip_reasons'][ $reason ] + 1 : 1;
 				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
-					turbo_cache_diagnostics_record( 'PRELOAD_CACHED', 'Preload warmed and verified cache on disk', array( 'url' => $current_url ) );
+					turbo_cache_diagnostics_record(
+						'PRELOAD_SKIPPED',
+						'Preload skipped URL: ' . $reason,
+						array(
+							'url'    => $current_url,
+							'reason' => $reason,
+						)
+					);
+				}
+				++$state['queue_cursor'];
+				++$processed_in_batch;
+				continue;
+			}
+
+			// Update UI active progress if upstream helper exists.
+			if ( function_exists( 'wpsc_update_active_preload' ) ) {
+				wpsc_update_active_preload( 'queue', $state['queue_cursor'] + 1, $current_url );
+			}
+
+			// Clear existing cache for URL before warming.
+			if ( function_exists( 'wpsc_delete_files' ) ) {
+				$candidate_dirs = turbo_cache_preload_get_cache_dirs_for_url( $current_url );
+				foreach ( $candidate_dirs as $cache_dir ) {
+					wpsc_delete_files( $cache_dir );
+				}
+			}
+
+			// Dispatch request outside critical section.
+			$fetch_result = turbo_cache_preload_fetch_url( $current_url );
+
+			++$state['stats']['processed'];
+
+			if ( $fetch_result['success'] ) {
+				$state['stats']['http_requests_successful'] = isset( $state['stats']['http_requests_successful'] ) ? $state['stats']['http_requests_successful'] + 1 : 1;
+				// Verify that cache entry was actually generated on disk. An HTTP 200 alone never counts as cached.
+				$cache_verified = turbo_cache_preload_verify_cache_entry( $current_url );
+
+				if ( $cache_verified ) {
+					++$state['stats']['cached'];
+					$state['consecutive_failures'] = 0;
+					if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+						turbo_cache_diagnostics_record( 'PRELOAD_CACHED', 'Preload warmed and verified cache on disk', array( 'url' => $current_url ) );
+					}
+				} else {
+					++$state['stats']['skipped'];
+					$state['stats']['skip_reasons']['not_cached'] = isset( $state['stats']['skip_reasons']['not_cached'] ) ? $state['stats']['skip_reasons']['not_cached'] + 1 : 1;
+					if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+						turbo_cache_diagnostics_record( 'PRELOAD_NOT_CACHED', 'Preload HTTP request succeeded (200) but cache file was not created on disk', array( 'url' => $current_url ) );
+					}
+				}
+			} elseif ( $fetch_result['redirect'] ) {
+				++$state['stats']['skipped'];
+				$redirect_reason                                    = ( isset( $fetch_result['target_safe'] ) && ! $fetch_result['target_safe'] ) ? 'unsafe_redirect_target' : 'redirect';
+				$state['stats']['skip_reasons'][ $redirect_reason ] = isset( $state['stats']['skip_reasons'][ $redirect_reason ] ) ? $state['stats']['skip_reasons'][ $redirect_reason ] + 1 : 1;
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record( 'PRELOAD_SKIPPED', 'Preload skipped redirect: ' . $redirect_reason, array( 'url' => $current_url ) );
+				}
+				if ( ! empty( $fetch_result['permanent_error'] ) ) {
+					$state['failures'][ $current_url ] = array(
+						'code'      => $fetch_result['code'],
+						'message'   => $fetch_result['error'],
+						'permanent' => true,
+						'timestamp' => time(),
+					);
 				}
 			} else {
-				++$state['stats']['skipped'];
-				$state['stats']['skip_reasons']['not_cached'] = isset( $state['stats']['skip_reasons']['not_cached'] ) ? $state['stats']['skip_reasons']['not_cached'] + 1 : 1;
-				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
-					turbo_cache_diagnostics_record( 'PRELOAD_NOT_CACHED', 'Preload HTTP request succeeded (200) but cache file was not created on disk', array( 'url' => $current_url ) );
-				}
-			}
-		} elseif ( $fetch_result['redirect'] ) {
-			++$state['stats']['skipped'];
-			$redirect_reason                                    = ( isset( $fetch_result['target_safe'] ) && ! $fetch_result['target_safe'] ) ? 'unsafe_redirect_target' : 'redirect';
-			$state['stats']['skip_reasons'][ $redirect_reason ] = isset( $state['stats']['skip_reasons'][ $redirect_reason ] ) ? $state['stats']['skip_reasons'][ $redirect_reason ] + 1 : 1;
-			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
-				turbo_cache_diagnostics_record( 'PRELOAD_SKIPPED', 'Preload skipped redirect: ' . $redirect_reason, array( 'url' => $current_url ) );
-			}
-			if ( ! empty( $fetch_result['permanent_error'] ) ) {
+				++$state['stats']['failed'];
+				++$state['consecutive_failures'];
 				$state['failures'][ $current_url ] = array(
 					'code'      => $fetch_result['code'],
 					'message'   => $fetch_result['error'],
-					'permanent' => true,
+					'permanent' => $fetch_result['permanent_error'],
 					'timestamp' => time(),
 				);
+				$state['last_error']               = $fetch_result['error'];
+				if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
+					turbo_cache_diagnostics_record(
+						'PRELOAD_FAILED',
+						'Preload request failed: ' . $fetch_result['error'],
+						array(
+							'url'  => $current_url,
+							'code' => $fetch_result['code'],
+						)
+					);
+				}
+
+				if ( $state['consecutive_failures'] >= 5 ) {
+					$state['status']     = 'paused';
+					$state['last_error'] = 'Circuit breaker triggered: 5 consecutive request failures.';
+					break;
+				}
 			}
-		} else {
-			++$state['stats']['failed'];
-			++$state['consecutive_failures'];
-			$state['failures'][ $current_url ] = array(
-				'code'      => $fetch_result['code'],
-				'message'   => $fetch_result['error'],
-				'permanent' => $fetch_result['permanent_error'],
-				'timestamp' => time(),
+
+			++$state['queue_cursor'];
+			++$processed_in_batch;
+
+			// Optional polite delay between requests.
+			$delay = defined( 'WPSC_PRELOAD_POST_INTERVAL' ) ? (int) WPSC_PRELOAD_POST_INTERVAL : 0;
+			if ( $delay > 0 ) {
+				sleep( min( 2, $delay ) );
+			}
+		}
+
+		// Responsive cancellation check after loop (catches cancellation arriving during the final URL).
+		if ( file_exists( $stop_flag ) ) {
+			$state['status'] = 'cancelled';
+			if ( function_exists( 'wpsc_update_idle_preload' ) ) {
+				wpsc_update_idle_preload( time() );
+			}
+		} elseif ( $state['queue_cursor'] >= $total_urls ) {
+			$state['status']      = 'completed';
+			$state['finished_at'] = time();
+			if ( function_exists( 'wpsc_update_idle_preload' ) ) {
+				wpsc_update_idle_preload( time() );
+			}
+		}
+
+		$saved         = turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
+		$lock_released = true;
+		turbo_cache_preload_release_lock( $worker_token );
+
+		if ( ! $saved ) {
+			return array(
+				'status'             => 'superseded',
+				'processed_in_batch' => $processed_in_batch,
+				'queue_cursor'       => $state['queue_cursor'],
+				'total_urls'         => $total_urls,
+				'stats'              => $state['stats'],
+				'message'            => 'Preload batch superseded before final state save.',
 			);
-			$state['last_error']               = $fetch_result['error'];
-			if ( function_exists( 'turbo_cache_diagnostics_record' ) ) {
-				turbo_cache_diagnostics_record(
-					'PRELOAD_FAILED',
-					'Preload request failed: ' . $fetch_result['error'],
-					array(
-						'url'  => $current_url,
-						'code' => $fetch_result['code'],
-					)
-				);
-			}
-
-			if ( $state['consecutive_failures'] >= 5 ) {
-				$state['status']     = 'paused';
-				$state['last_error'] = 'Circuit breaker triggered: 5 consecutive request failures.';
-				break;
-			}
 		}
 
-		++$state['queue_cursor'];
-		++$processed_in_batch;
-
-		// Optional polite delay between requests.
-		$delay = defined( 'WPSC_PRELOAD_POST_INTERVAL' ) ? (int) WPSC_PRELOAD_POST_INTERVAL : 0;
-		if ( $delay > 0 ) {
-			sleep( min( 2, $delay ) );
-		}
-	}
-
-	// Completion check.
-	if ( $state['queue_cursor'] >= $total_urls ) {
-		$state['status']      = 'completed';
-		$state['finished_at'] = time();
-		if ( function_exists( 'wpsc_update_idle_preload' ) ) {
-			wpsc_update_idle_preload( time() );
-		}
-	}
-
-	$saved = turbo_cache_preload_save_state( $state, $worker_generation, $worker_token );
-	turbo_cache_preload_release_lock( $worker_token );
-
-	if ( ! $saved ) {
 		return array(
-			'status'             => 'superseded',
+			'status'             => $state['status'],
 			'processed_in_batch' => $processed_in_batch,
 			'queue_cursor'       => $state['queue_cursor'],
 			'total_urls'         => $total_urls,
 			'stats'              => $state['stats'],
-			'message'            => 'Preload batch superseded before final state save.',
 		);
+	} finally {
+		if ( ! $lock_released && null !== $worker_token ) {
+			turbo_cache_preload_release_lock( $worker_token );
+		}
 	}
-
-	return array(
-		'status'             => $state['status'],
-		'processed_in_batch' => $processed_in_batch,
-		'queue_cursor'       => $state['queue_cursor'],
-		'total_urls'         => $total_urls,
-		'stats'              => $state['stats'],
-	);
 }

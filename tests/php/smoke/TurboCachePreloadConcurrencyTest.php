@@ -11,6 +11,9 @@
 // phpcs:disable WordPress.PHP.NoSilencedErrors.Discouraged
 // phpcs:disable Generic.Formatting.MultipleStatementAlignment.NotSameWarning
 // phpcs:disable Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed
+// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export
+// phpcs:disable WordPress.PHP.DiscouragedPHPFunctions.system_calls_proc_open
+// phpcs:disable Squiz.Strings.DoubleQuoteUsage.NotRequired
 
 require_once dirname( __DIR__, 3 ) . '/inc/preload-engine.php';
 require_once dirname( __DIR__, 3 ) . '/inc/preload.php';
@@ -119,6 +122,16 @@ class TurboCachePreloadConcurrencyTest extends TestCase {
 		$this->assertEmpty( $state_after['queue'] );
 		$this->assertSame( 0, $state_after['queue_cursor'] );
 		$this->assertNotSame( $w1_gen, $state_after['generation'] );
+
+		// Under SEC-4, reset does NOT remove an active worker's valid lock!
+		$this->assertSame( $worker1_token, turbo_cache_preload_get_lock_token() );
+		$worker2_token = null;
+		$this->assertFalse( turbo_cache_preload_acquire_lock( $worker2_token ) );
+
+		// Only when Worker 1 releases its lock can a new worker acquire it.
+		$this->assertTrue( turbo_cache_preload_release_lock( $worker1_token ) );
+		$this->assertTrue( turbo_cache_preload_acquire_lock( $worker2_token ) );
+		turbo_cache_preload_release_lock( $worker2_token );
 	}
 
 	/**
@@ -528,5 +541,268 @@ class TurboCachePreloadConcurrencyTest extends TestCase {
 		$this->assertSame( 'completed', $final_state['status'] );
 		$this->assertSame( 3, $final_state['queue_cursor'] );
 		$this->assertGreaterThan( 0, $final_state['finished_at'] );
+	}
+
+	/**
+	 * 13. Empty lock file does not permit foreign-lock deletion (SEC-2).
+	 */
+	public function test_empty_lock_file_does_not_permit_foreign_deletion() {
+		$lock_file = $this->temp_dir . 'preload_batch.lock';
+		file_put_contents( $lock_file, '' );
+
+		// Attempting ownership-verified release on an empty lock file must fail.
+		$released = turbo_cache_preload_release_lock( 'worker_hypothetical_123' );
+		$this->assertFalse( $released, 'Empty lock file must not be deleted by worker token release' );
+		$this->assertFileExists( $lock_file );
+
+		// turbo_cache_preload_get_lock_token() must return null.
+		$this->assertNull( turbo_cache_preload_get_lock_token() );
+
+		// Cleanup empty lock file.
+		@unlink( $lock_file );
+	}
+
+	/**
+	 * 14. Malformed or unreadable lock content is handled safely (SEC-2).
+	 */
+	public function test_malformed_or_unreadable_lock_content_handled_safely() {
+		$lock_file = $this->temp_dir . 'preload_batch.lock';
+		file_put_contents( $lock_file, 'INVALID_JSON_CORRUPTED_CONTENT' );
+
+		// Worker cannot release corrupt lock with token.
+		$released = turbo_cache_preload_release_lock( 'worker_any_token' );
+		$this->assertFalse( $released );
+		$this->assertFileExists( $lock_file );
+
+		// get_lock_token returns empty string for non-tokenized/legacy lock.
+		$this->assertSame( '', turbo_cache_preload_get_lock_token() );
+
+		@unlink( $lock_file );
+	}
+
+	/**
+	 * 15. Cancellation arriving during the final URL marks status as cancelled (SEC-5).
+	 */
+	public function test_cancellation_during_final_url_marks_cancelled() {
+		turbo_cache_preload_reset_state();
+
+		$state                              = turbo_cache_preload_get_state();
+		$state['status']                    = 'running';
+		$state['queue']                     = array( 'https://example.com/final-only' );
+		$state['queue_cursor']              = 0;
+		$state['stats']['total_discovered'] = 1;
+		turbo_cache_preload_save_state( $state );
+
+		// Create stop flag during the fetch of this 1st (and final) URL.
+		add_filter(
+			'pre_http_request',
+			function ( $response, $parsed_args, $url ) {
+				unset( $response, $parsed_args, $url );
+				global $cache_path;
+				file_put_contents( $cache_path . 'stop_preload.txt', '' );
+				return array(
+					'response' => array(
+						'code'    => 200,
+						'message' => 'OK',
+					),
+					'body'     => '<html><body>Final</body></html>',
+				);
+			},
+			10,
+			3
+		);
+
+		$batch_res = turbo_cache_preload_process_batch( 1 );
+		remove_all_filters( 'pre_http_request' );
+
+		// Status must be cancelled, NOT completed!
+		$this->assertSame( 'cancelled', $batch_res['status'] );
+		$this->assertSame( 1, $batch_res['processed_in_batch'] );
+		$this->assertSame( 1, $batch_res['queue_cursor'] );
+
+		// Progress was preserved on disk.
+		$disk_state = turbo_cache_preload_get_state();
+		$this->assertSame( 'cancelled', $disk_state['status'] );
+		$this->assertSame( 1, $disk_state['queue_cursor'] );
+		$this->assertSame( 1, $disk_state['stats']['processed'] );
+
+		// Lock must be released cleanly.
+		$this->assertNull( turbo_cache_preload_get_lock_token() );
+	}
+
+	/**
+	 * 16. Exceptions in process_batch trigger safe lock cleanup via try/finally (SEC-6).
+	 */
+	public function test_exception_in_batch_triggers_safe_lock_cleanup() {
+		turbo_cache_preload_reset_state();
+
+		$state                              = turbo_cache_preload_get_state();
+		$state['status']                    = 'running';
+		$state['queue']                     = array( 'https://example.com/crashing-url' );
+		$state['queue_cursor']              = 0;
+		$state['stats']['total_discovered'] = 1;
+		turbo_cache_preload_save_state( $state );
+
+		add_filter(
+			'pre_http_request',
+			function () {
+				throw new \RuntimeException( 'Simulated unexpected network failure' );
+			}
+		);
+
+		$caught = false;
+		try {
+			turbo_cache_preload_process_batch( 1 );
+		} catch ( \RuntimeException $e ) {
+			$caught = true;
+			$this->assertSame( 'Simulated unexpected network failure', $e->getMessage() );
+		} finally {
+			remove_all_filters( 'pre_http_request' );
+		}
+
+		$this->assertTrue( $caught, 'Exception must propagate and not be swallowed' );
+
+		// Lock must NOT be left orphaned on disk!
+		$this->assertNull( turbo_cache_preload_get_lock_token() );
+		$this->assertFileDoesNotExist( $this->temp_dir . 'preload_batch.lock' );
+	}
+
+	/**
+	 * 17. Multi-process mutual exclusion on worker lock.
+	 */
+	public function test_multi_process_worker_lock_exclusion() {
+		$engine_path = dirname( __DIR__, 3 ) . '/inc/preload-engine.php';
+		$script_file = $this->temp_dir . 'child_worker.php';
+		$code        = "<?php\n"
+			. "require_once " . var_export( $engine_path, true ) . ";\n"
+			. "\$GLOBALS['cache_path'] = " . var_export( $this->temp_dir, true ) . ";\n"
+			. "\$tok = null;\n"
+			. "\$ok = turbo_cache_preload_acquire_lock( \$tok );\n"
+			. "file_put_contents( " . var_export( $this->temp_dir . 'child_started.json', true ) . ", json_encode( array( 'ok' => \$ok, 'token' => \$tok ) ) );\n"
+			. "while ( ! file_exists( " . var_export( $this->temp_dir . 'child_release.txt', true ) . " ) ) {\n"
+			. "    usleep( 10000 );\n"
+			. "}\n"
+			. "turbo_cache_preload_release_lock( \$tok );\n";
+		file_put_contents( $script_file, $code );
+
+		$cmd         = PHP_BINARY . ' ' . escapeshellarg( $script_file );
+		$descriptors = array(
+			0 => array( 'pipe', 'r' ),
+			1 => array( 'pipe', 'w' ),
+			2 => array( 'pipe', 'w' ),
+		);
+
+		$proc = proc_open( $cmd, $descriptors, $pipes );
+		$this->assertIsResource( $proc );
+
+		// Wait for child to start and acquire lock.
+		$started_file = $this->temp_dir . 'child_started.json';
+		$timeout      = time() + 5;
+		while ( ! file_exists( $started_file ) && time() < $timeout ) {
+			usleep( 20000 );
+		}
+		$this->assertFileExists( $started_file );
+		$child_data = json_decode( file_get_contents( $started_file ), true );
+		$this->assertTrue( $child_data['ok'] );
+
+		// Parent tries to acquire lock in a separate process/context -> must fail!
+		$parent_token = null;
+		$this->assertFalse( turbo_cache_preload_acquire_lock( $parent_token ) );
+
+		// Signal child to release lock.
+		file_put_contents( $this->temp_dir . 'child_release.txt', '1' );
+
+		// Wait for child to exit.
+		fclose( $pipes[0] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		proc_close( $proc );
+
+		// Now parent can acquire lock.
+		$this->assertTrue( turbo_cache_preload_acquire_lock( $parent_token ) );
+		turbo_cache_preload_release_lock( $parent_token );
+	}
+
+	/**
+	 * 18. Multi-process race on stale-lock recovery: only one process acquires ownership.
+	 */
+	public function test_multi_process_stale_lock_recovery_mutual_exclusion() {
+		$lock_file = $this->temp_dir . 'preload_batch.lock';
+		file_put_contents(
+			$lock_file,
+			json_encode(
+				array(
+					'token' => 'worker_ancient_race',
+					'time'  => time() - 800,
+				)
+			)
+		);
+		touch( $lock_file, time() - 800 );
+
+		$engine_path  = dirname( __DIR__, 3 ) . '/inc/preload-engine.php';
+		$script1_file = $this->temp_dir . 'child_race_1.php';
+		$script2_file = $this->temp_dir . 'child_race_2.php';
+
+		$make_code = function ( $id ) use ( $engine_path ) {
+			return "<?php\n"
+				. "require_once " . var_export( $engine_path, true ) . ";\n"
+				. "\$GLOBALS['cache_path'] = " . var_export( $this->temp_dir, true ) . ";\n"
+				. "while ( ! file_exists( " . var_export( $this->temp_dir . 'race_start.txt', true ) . " ) ) {\n"
+				. "    usleep( 1000 );\n"
+				. "}\n"
+				. "\$tok = null;\n"
+				. "\$ok = turbo_cache_preload_acquire_lock( \$tok );\n"
+				. "file_put_contents( " . var_export( $this->temp_dir . 'race_res_' . $id . '.json', true ) . ", json_encode( array( 'ok' => \$ok, 'token' => \$tok ) ) );\n";
+		};
+
+		file_put_contents( $script1_file, $make_code( 1 ) );
+		file_put_contents( $script2_file, $make_code( 2 ) );
+
+		$descriptors = array(
+			0 => array( 'pipe', 'r' ),
+			1 => array( 'pipe', 'w' ),
+			2 => array( 'pipe', 'w' ),
+		);
+
+		$p1 = proc_open( PHP_BINARY . ' ' . escapeshellarg( $script1_file ), $descriptors, $pipes1 );
+		$p2 = proc_open( PHP_BINARY . ' ' . escapeshellarg( $script2_file ), $descriptors, $pipes2 );
+
+		// Release both children simultaneously with start trigger.
+		file_put_contents( $this->temp_dir . 'race_start.txt', 'GO' );
+
+		// Wait for both results.
+		$res1_file = $this->temp_dir . 'race_res_1.json';
+		$res2_file = $this->temp_dir . 'race_res_2.json';
+		$timeout   = time() + 5;
+		while ( ( ! file_exists( $res1_file ) || ! file_exists( $res2_file ) ) && time() < $timeout ) {
+			usleep( 20000 );
+		}
+
+		$this->assertFileExists( $res1_file );
+		$this->assertFileExists( $res2_file );
+
+		$d1 = json_decode( file_get_contents( $res1_file ), true );
+		$d2 = json_decode( file_get_contents( $res2_file ), true );
+
+		// Exactly one must succeed!
+		$this->assertTrue(
+			( $d1['ok'] && ! $d2['ok'] ) || ( ! $d1['ok'] && $d2['ok'] ),
+			'Exactly one child process must win stale-lock recovery'
+		);
+
+		fclose( $pipes1[0] );
+		fclose( $pipes1[1] );
+		fclose( $pipes1[2] );
+		proc_close( $p1 );
+
+		fclose( $pipes2[0] );
+		fclose( $pipes2[1] );
+		fclose( $pipes2[2] );
+		proc_close( $p2 );
+
+		// Cleanup winning lock.
+		$winning_token = $d1['ok'] ? $d1['token'] : $d2['token'];
+		$this->assertSame( $winning_token, turbo_cache_preload_get_lock_token() );
+		turbo_cache_preload_release_lock( $winning_token );
 	}
 }
